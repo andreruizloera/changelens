@@ -1,0 +1,13 @@
+diff --git a/payments/refund.py b/payments/refund.py
+index 2772020..ba9fdbf 100644
+--- a/payments/refund.py
++++ b/payments/refund.py
+@@ -9,6 +9,8 @@ class RefundError(Exception):
+ 
+ def refund_payment(charge_id: str, amount_cents: int) -> dict:
+     """Reverse a charge and return a refund record."""
++    if not charge_id:
++        raise RefundError("charge_id is required")
+     try:
+         reversal_id = reverse_charge(charge_id, amount_cents)
+     except GatewayError as exc:
