@@ -7,10 +7,10 @@ Honest future work. None of this is implemented yet.
 - **TypeScript analyzer.** Second implementation of the
   `LanguageAnalyzer` protocol (ES module and CommonJS imports,
   tsconfig path aliases), which will also pressure-test the interface.
-- **`--fail-on` CI gating.** Exit nonzero when the blast radius crosses
-  a threshold, e.g. `--fail-on "affected>20"` or
-  `--fail-on confidence=low`, so CI can require a human look at wide
-  changes.
+- **Baseline gating.** Compare against a stored report so `--fail-on` can
+  trip on growth ("this branch widened the radius by 10 files") rather
+  than only on an absolute threshold that a large repository crosses on
+  every pull request.
 - **Ref range syntax.** Accept `A..B` and `A...B` directly instead of
   always comparing against HEAD.
 - **`--tests-only` output.** Print just the relevant test paths,

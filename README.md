@@ -25,8 +25,9 @@ changelens HEAD~1
 
 ## Example output
 
-This is the real output of `./demo.sh`, which commits a change to
-`refund_payment` in the bundled example project and runs changelens on it:
+This is the first half of the real output of `./demo.sh`, which commits a
+change to `refund_payment` in the bundled example project and runs
+changelens on it (the second half is under [CI gating](#ci-gating)):
 
 ```
 $ changelens HEAD~1
@@ -66,7 +67,8 @@ Useful moments:
 - pre-review: paste the report into the PR so reviewers see the radius
 - pre-merge: check that the "Relevant tests" list actually ran in CI
 - refactoring: `changelens --staged` before committing a risky edit
-- CI: `changelens origin/main --json` to gate or annotate builds
+- CI: `changelens origin/main --fail-on "affected>20"` to stop a wide
+  change from merging without a human look
 
 ## Installation
 
@@ -89,6 +91,7 @@ changelens --staged        # impact of what is staged right now
 changelens HEAD~1 --json     # machine-readable report
 changelens HEAD~1 --mermaid  # impact graph as a mermaid flowchart
 changelens HEAD~1 --repo ~/src/myproject   # run against another repo
+changelens main --fail-on "affected>20"    # exit 1 if the radius is wide
 ```
 
 The mermaid output pastes directly into GitHub comments, GitLab, and
@@ -96,6 +99,82 @@ mermaid.live:
 
 ```sh
 changelens HEAD~1 --mermaid | pbcopy
+```
+
+## CI gating
+
+`--fail-on` turns the report into a build decision. A condition is written
+the way the failure reads, so `--fail-on "affected>20"` means "fail when
+more than 20 files are affected". The flag is repeatable, and the gate
+fails if any single condition is true.
+
+This is the second half of `./demo.sh`, run against the same change as
+above:
+
+```
+$ changelens HEAD~1 --fail-on "affected>4" --fail-on "tests=0"
+
+...
+Gate: failed
+  FAIL  affected>4  (actual: affected = 6)
+  ok    tests=0     (actual: tests = 2)
+
+$ echo $?
+1
+```
+
+Metrics:
+
+| metric | counts |
+| --- | --- |
+| `changed` | changed Python files |
+| `direct` | files that import a changed module directly |
+| `transitive` | files reached at distance 2 or more |
+| `tests` | test files reached from the change |
+| `affected` | all downstream files (direct + transitive + tests) |
+| `distance` | longest import hop from a change to a dependent |
+| `confidence` | `high`, `medium`, or `low` |
+
+Operators are `>`, `>=`, `<`, `<=`, `=` (or `==`), and `!=`. Quote the
+expression, or your shell will read `>` as a redirect; changelens says so
+by name if you forget.
+
+Two behaviors are judgement calls, so they are stated rather than left to
+be discovered:
+
+- **Confidence compares by risk**, not alphabetically: `high < medium <
+  low`. `--fail-on "confidence>=medium"` trips on a Medium or a Low
+  report; `--fail-on "confidence=low"` trips only on Low.
+- **The gate is skipped, not passed, when a diff has no Python changes.**
+  Every count would be zero, and a condition like `tests=0` would
+  otherwise fire on a documentation-only pull request. The report says
+  `Gate: skipped` and the exit code is 0.
+
+When a numeric condition passes on a Medium or Low report, the gate says
+so: a degraded report under-counts (star imports and dynamic imports hide
+edges), so its all-clear is weaker evidence than the same all-clear at
+High confidence.
+
+```
+Gate: passed
+  ok    affected>10  (actual: affected = 1)
+  Note: confidence is Medium, so the counts this gate read can be
+        lower than reality; a passing number is weaker evidence here.
+```
+
+Exit codes: `0` clean, `1` a gate condition tripped, `2` a usage or git
+error. A bad expression is rejected before git runs.
+
+With `--json` or `--mermaid` the gate block goes to stderr so stdout stays
+machine-readable, and the JSON report carries `metrics` and a `gate`
+object with every condition, its threshold, its actual value, and whether
+it tripped.
+
+```yaml
+- name: Blast radius
+  run: |
+    changelens origin/${{ github.base_ref }} \
+      --fail-on "affected>20" --fail-on "confidence=low"
 ```
 
 ## How it works
@@ -141,6 +220,7 @@ src/changelens/
   python_analyzer.py   the Python implementation (stdlib ast only)
   graph.py             repository-wide import graph construction
   impact.py            dependent discovery, ranking, confidence heuristic
+  gate.py              --fail-on expressions, metrics, pass/fail decision
   report.py            terminal, JSON, and mermaid renderers
 ```
 
@@ -179,9 +259,9 @@ read the confidence reasons before trusting a Low-confidence report.
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md). Highlights: TypeScript analyzer over the
-existing interface, `--fail-on` thresholds for CI gating, coverage-map
-ingestion so "relevant tests" comes from observed execution rather than
-imports alone.
+existing interface, coverage-map ingestion so "relevant tests" comes from
+observed execution rather than imports alone, and gating against a stored
+baseline so a gradually widening blast radius is visible.
 
 ## Contributing
 

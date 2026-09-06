@@ -27,3 +27,24 @@ fi
 echo "\$ changelens HEAD~1"
 echo
 "${RUN[@]}" HEAD~1
+
+echo
+echo "\$ changelens HEAD~1 --fail-on \"affected>4\" --fail-on \"tests=0\""
+echo
+set +e
+GATED="$("${RUN[@]}" HEAD~1 --fail-on "affected>4" --fail-on "tests=0")"
+STATUS=$?
+set -e
+# The blast radius above is unchanged; show the gate block it now ends with.
+echo "..."
+echo "$GATED" | tail -n 3
+echo
+echo "\$ echo \$?"
+echo "$STATUS"
+
+# The gate is the point of this step: if it stops failing here, the exit code
+# pasted into the README has drifted from the tool and CI should say so.
+if [ "$STATUS" -ne 1 ]; then
+    echo "demo: expected the gate to fail with exit 1, got $STATUS" >&2
+    exit 1
+fi

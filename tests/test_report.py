@@ -82,7 +82,7 @@ def test_terminal_report_empty_sections() -> None:
 
 def test_json_schema() -> None:
     payload = json.loads(render_json(sample_report()))
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert set(payload) == {
         "schema_version",
         "changed",
@@ -91,6 +91,16 @@ def test_json_schema() -> None:
         "relevant_tests",
         "confidence",
         "ignored_files",
+        "metrics",
+    }
+    # "gate" is the one key that appears only when --fail-on was passed.
+    assert payload["metrics"] == {
+        "changed": 1,
+        "direct": 2,
+        "transitive": 1,
+        "tests": 1,
+        "affected": 4,
+        "distance": 2,
     }
     assert payload["changed"] == [
         {"file": "payments/refund.py", "symbol": "refund_payment", "kind": "function"}

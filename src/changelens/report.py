@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 import re
 
+from changelens.gate import CONFIDENCE, GateResult, metrics_of
 from changelens.impact import HIGH, Dependent, Report
 
-JSON_SCHEMA_VERSION = 1
+# 2 added the always-present "metrics" object and the "gate" object that
+# appears when --fail-on is used. Everything from version 1 is unchanged.
+JSON_SCHEMA_VERSION = 2
 
 
-def render_terminal(report: Report) -> str:
+def render_terminal(report: Report, gate: GateResult | None = None) -> str:
     lines = ["Change blast radius", "-------------------", ""]
 
     lines.append("Changed:")
@@ -50,11 +53,35 @@ def render_terminal(report: Report) -> str:
             f"Note: {len(report.ignored_files)} non-Python file(s) changed and were not analyzed:"
         )
         lines.extend(f"  {path}" for path in report.ignored_files)
+
+    if gate is not None:
+        lines.append("")
+        lines.append(render_gate(gate))
     return "\n".join(lines)
 
 
-def render_json(report: Report) -> str:
-    payload = {
+def render_gate(gate: GateResult) -> str:
+    """The gate verdict as its own block, for the terminal or for stderr."""
+    if gate.skipped:
+        return "Gate: skipped (no Python changes to measure)"
+
+    lines = [f"Gate: {'failed' if gate.failed else 'passed'}"]
+    width = max(len(r.condition.expression) for r in gate.results) if gate.results else 0
+    for result in gate.results:
+        mark = "FAIL" if result.tripped else "ok  "
+        expression = result.condition.expression.ljust(width)
+        metric = result.condition.metric
+        lines.append(f"  {mark}  {expression}  (actual: {metric} = {result.actual_text})")
+    if gate.understated:
+        lines.append(
+            f"  Note: confidence is {gate.confidence}, so the counts this gate read can be"
+        )
+        lines.append("        lower than reality; a passing number is weaker evidence here.")
+    return "\n".join(lines)
+
+
+def render_json(report: Report, gate: GateResult | None = None) -> str:
+    payload: dict[str, object] = {
         "schema_version": JSON_SCHEMA_VERSION,
         "changed": [{"file": c.file, "symbol": c.qualname, "kind": c.kind} for c in report.changed],
         "direct_dependents": [_dep_dict(d) for d in report.direct_dependents],
@@ -65,8 +92,30 @@ def render_json(report: Report) -> str:
             "reasons": list(report.confidence_reasons),
         },
         "ignored_files": list(report.ignored_files),
+        "metrics": metrics_of(report),
     }
+    if gate is not None:
+        payload["gate"] = _gate_dict(gate)
     return json.dumps(payload, indent=2)
+
+
+def _gate_dict(gate: GateResult) -> dict[str, object]:
+    return {
+        "failed": gate.failed,
+        "skipped": gate.skipped,
+        "understated": gate.understated,
+        "conditions": [
+            {
+                "expression": r.condition.expression,
+                "metric": r.condition.metric,
+                "operator": r.condition.op,
+                "value": r.condition.value_text,
+                "actual": r.actual_text if r.condition.metric == CONFIDENCE else r.actual,
+                "tripped": r.tripped,
+            }
+            for r in gate.results
+        ],
+    }
 
 
 def _dep_dict(dep: Dependent) -> dict[str, object]:
