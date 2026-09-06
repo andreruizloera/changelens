@@ -10,3 +10,4 @@ build/
 .coverage
 .env
 .DS_Store
+.changelens-baseline.json

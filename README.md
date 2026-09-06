@@ -25,9 +25,10 @@ changelens HEAD~1
 
 ## Example output
 
-This is the first half of the real output of `./demo.sh`, which commits a
+This is the first part of the real output of `./demo.sh`, which commits a
 change to `refund_payment` in the bundled example project and runs
-changelens on it (the second half is under [CI gating](#ci-gating)):
+changelens on it (the rest is under [CI gating](#ci-gating) and [Gating on
+growth](#gating-on-growth)):
 
 ```
 $ changelens HEAD~1
@@ -69,6 +70,9 @@ Useful moments:
 - refactoring: `changelens --staged` before committing a risky edit
 - CI: `changelens origin/main --fail-on "affected>20"` to stop a wide
   change from merging without a human look
+- long-lived branch: `--save-baseline` when the work starts, then
+  `--fail-on "affected>baseline+10"` to catch the commit that quietly
+  widened it
 
 ## Installation
 
@@ -92,6 +96,8 @@ changelens HEAD~1 --json     # machine-readable report
 changelens HEAD~1 --mermaid  # impact graph as a mermaid flowchart
 changelens HEAD~1 --repo ~/src/myproject   # run against another repo
 changelens main --fail-on "affected>20"    # exit 1 if the radius is wide
+changelens main --save-baseline            # record this radius for later
+changelens main --fail-on "affected>baseline+10"   # exit 1 if it widened
 ```
 
 The mermaid output pastes directly into GitHub comments, GitLab, and
@@ -108,7 +114,7 @@ the way the failure reads, so `--fail-on "affected>20"` means "fail when
 more than 20 files are affected". The flag is repeatable, and the gate
 fails if any single condition is true.
 
-This is the second half of `./demo.sh`, run against the same change as
+This is the second part of `./demo.sh`, run against the same change as
 above:
 
 ```
@@ -135,9 +141,11 @@ Metrics:
 | `distance` | longest import hop from a change to a dependent |
 | `confidence` | `high`, `medium`, or `low` |
 
-Operators are `>`, `>=`, `<`, `<=`, `=` (or `==`), and `!=`. Quote the
-expression, or your shell will read `>` as a redirect; changelens says so
-by name if you forget.
+Operators are `>`, `>=`, `<`, `<=`, `=` (or `==`), and `!=`. The right side
+is a number, a confidence level, or a comparison against a saved baseline
+(`baseline`, `baseline+10`, `baseline-3`); see [Gating on
+growth](#gating-on-growth). Quote the expression, or your shell will read
+`>` as a redirect; changelens says so by name if you forget.
 
 Two behaviors are judgement calls, so they are stated rather than left to
 be discovered:
@@ -162,8 +170,8 @@ Gate: passed
         lower than reality; a passing number is weaker evidence here.
 ```
 
-Exit codes: `0` clean, `1` a gate condition tripped, `2` a usage or git
-error. A bad expression is rejected before git runs.
+Exit codes: `0` clean, `1` a gate condition tripped, `2` a usage, git, or
+baseline error. A bad expression is rejected before git runs.
 
 With `--json` or `--mermaid` the gate block goes to stderr so stdout stays
 machine-readable, and the JSON report carries `metrics` and a `gate`
@@ -175,6 +183,88 @@ it tripped.
   run: |
     changelens origin/${{ github.base_ref }} \
       --fail-on "affected>20" --fail-on "confidence=low"
+```
+
+## Gating on growth
+
+An absolute threshold is the wrong instrument in a large repository: if a
+routine pull request there affects 40 files, `affected>20` fires on every
+one of them, and a gate that always fires gets deleted. The question worth
+gating on is whether this branch made the radius wider.
+
+`--save-baseline` writes the current run's numbers to
+`.changelens-baseline.json`, and a condition can compare against it with
+`baseline`, optionally offset: `affected>baseline+10` means "fail when this
+run is more than 10 files wider than the baseline".
+
+This is the third part of `./demo.sh`. It saves the radius of the refund
+change, then commits a second change that reaches a formatting helper the
+billing side shares:
+
+```
+$ changelens base --save-baseline
+
+...
+Baseline saved to .changelens-baseline.json (ref base: affected = 6, confidence High)
+
+$ changelens base --fail-on "affected>baseline"
+
+...
+Gate: failed
+  FAIL  affected>baseline  (actual: affected = 9, baseline 6, +3)
+        3 files entered the radius since the baseline:
+          billing/statements.py
+          reports/monthly.py
+          tests/test_statements.py
+
+$ echo $?
+1
+```
+
+Naming the files that entered is the point of storing more than a count: a
+reviewer's next question after "+3" is always "which three".
+
+Four behaviors here are judgement calls, so they are stated rather than
+left to be discovered:
+
+- **A missing baseline is an error, not a pass.** `--fail-on
+  "affected>baseline"` with no baseline file exits 2 and prints the command
+  that would write one. A gate that waves a branch through because a file
+  was missing is a rubber stamp. If a missing baseline should be tolerated
+  in your pipeline, that is one visible line of shell, below.
+- **A baseline for a different range is refused.** The file records what it
+  was taken against (`main`, `HEAD~1`, `--staged`), and comparing the radius
+  of one diff to the radius of another is not growth, it is two answers to
+  two questions. Mismatches exit 2 and name both.
+- **A range with no Python changes never overwrites a baseline.** Every
+  count there would be zero, and saving that would make the next branch look
+  like it invented the entire radius by itself. The existing file is left
+  alone and the run says so.
+- **Confidence compares against the baseline too**, as
+  `--fail-on "confidence>baseline"`: fail when this run is less trustworthy
+  than the one the baseline came from. It takes no offset, because a step on
+  a three-level risk scale is not a quantity. When the two runs read at
+  different confidence levels, the gate says so, since some of the movement
+  in the numbers is then edges becoming visible rather than impact changing.
+
+The baseline file also records the HEAD sha and the timestamp it was taken
+at. Those are provenance for a human: changelens does not verify that a
+baseline came from the same repository, the same branch, or an ancestor
+commit, and it cannot tell you if you point it at an unrelated one.
+
+`--baseline PATH` puts the file somewhere else (both to write and to read).
+In CI, cache it per branch and decide for yourself what a first run means:
+
+```yaml
+- name: Blast radius growth
+  run: |
+    # The first run on a branch has nothing to compare against; that is a
+    # decision for the pipeline to make out loud, not for changelens to
+    # make quietly.
+    if [ -f .changelens-baseline.json ]; then
+      changelens origin/${{ github.base_ref }} --fail-on "affected>baseline+10"
+    fi
+    changelens origin/${{ github.base_ref }} --save-baseline
 ```
 
 ## How it works
@@ -221,6 +311,7 @@ src/changelens/
   graph.py             repository-wide import graph construction
   impact.py            dependent discovery, ranking, confidence heuristic
   gate.py              --fail-on expressions, metrics, pass/fail decision
+  baseline.py          the saved-report file format and its comparability
   report.py            terminal, JSON, and mermaid renderers
 ```
 
@@ -252,6 +343,9 @@ you when its own inputs were degraded, but it cannot see:
   `src/` directory
 - non-Python files; changed ones are listed as ignored, never silently
   dropped
+- whether a baseline came from this repository or this branch; the spec it
+  was taken with is checked, the commit it was taken at is recorded and not
+  verified
 
 Treat "Potentially affected" as a review checklist, not a verdict, and
 read the confidence reasons before trusting a Low-confidence report.
@@ -260,8 +354,8 @@ read the confidence reasons before trusting a Low-confidence report.
 
 See [ROADMAP.md](ROADMAP.md). Highlights: TypeScript analyzer over the
 existing interface, coverage-map ingestion so "relevant tests" comes from
-observed execution rather than imports alone, and gating against a stored
-baseline so a gradually widening blast radius is visible.
+observed execution rather than imports alone, and `A..B` range syntax
+instead of always comparing against HEAD.
 
 ## Contributing
 

@@ -45,6 +45,17 @@ def repo_root(cwd: Path) -> Path:
     return Path(out.strip())
 
 
+def head_sha(root: Path) -> str | None:
+    """The commit a baseline was taken at, recorded as provenance for a human.
+
+    None on a repository with no commits yet, which is not worth failing over.
+    """
+    try:
+        return run_git(["rev-parse", "HEAD"], root).strip() or None
+    except GitError:
+        return None
+
+
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 

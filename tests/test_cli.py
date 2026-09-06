@@ -179,3 +179,238 @@ class TestFailOn:
         out = capsys.readouterr().out
         assert "No changes found" in out
         assert "Gate: skipped" in out
+
+
+@pytest.fixture
+def branch(git_repo: Path) -> Path:
+    """A repo whose branch grows: one commit off `base`, then a wider one.
+
+    pkg/core.py reaches app.py and its test; pkg/util.py reaches a second,
+    disjoint pair. Changing core alone is the baseline; the later commit
+    reaches into util and widens the radius by two files.
+    """
+    write_tree(
+        git_repo,
+        {
+            "pkg/__init__.py": "",
+            "pkg/core.py": "def run(n):\n    return n + 1\n",
+            "pkg/util.py": "def helper(n):\n    return n * 2\n",
+            "app.py": "from pkg.core import run\n\n\ndef go():\n    return run(1)\n",
+            "lib.py": "from pkg.util import helper\n\n\ndef use():\n    return helper(2)\n",
+            "tests/test_app.py": "from app import go\n",
+            "tests/test_lib.py": "from lib import use\n",
+        },
+    )
+    commit_all(git_repo, "baseline")
+    git(git_repo, "branch", "base")
+    write_tree(git_repo, {"pkg/core.py": "def run(n):\n    return n + 2\n"})
+    commit_all(git_repo, "narrow change")
+    return git_repo
+
+
+def grow(repo: Path) -> None:
+    write_tree(repo, {"pkg/util.py": "def helper(n):\n    return n * 3\n"})
+    commit_all(repo, "wider change")
+
+
+class TestBaseline:
+    def test_save_then_gate_on_growth(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["base", "--save-baseline", "--repo", str(branch)]) == 0
+        saved = capsys.readouterr().out
+        assert "Baseline saved to .changelens-baseline.json (ref base: affected = 2" in saved
+        assert (branch / ".changelens-baseline.json").exists()
+
+        grow(branch)
+        assert main(["base", "--fail-on", "affected>baseline", "--repo", str(branch)]) == 1
+        out = capsys.readouterr().out
+        assert "FAIL  affected>baseline  (actual: affected = 4, baseline 2, +2)" in out
+        assert "2 files entered the radius since the baseline:" in out
+        assert "          lib.py" in out
+        assert "          tests/test_lib.py" in out
+
+    def test_growth_within_the_offset_passes(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["base", "--save-baseline", "--repo", str(branch)]) == 0
+        grow(branch)
+        assert main(["base", "--fail-on", "affected>baseline+5", "--repo", str(branch)]) == 0
+        assert "Gate: passed" in capsys.readouterr().out
+
+    def test_an_unchanged_branch_does_not_trip(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["base", "--save-baseline", "--repo", str(branch)]) == 0
+        assert main(["base", "--fail-on", "affected>baseline", "--repo", str(branch)]) == 0
+        assert "baseline 2, no change" in capsys.readouterr().out
+
+    def test_missing_baseline_is_an_error_with_the_command_to_fix_it(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Never a silent pass: that is the failure mode a gate exists to stop.
+        assert main(["base", "--fail-on", "affected>baseline", "--repo", str(branch)]) == 2
+        err = capsys.readouterr().err
+        assert "no baseline at .changelens-baseline.json" in err
+        assert "changelens base --save-baseline" in err
+
+    def test_a_baseline_for_another_range_is_refused(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["base", "--save-baseline", "--repo", str(branch)]) == 0
+        capsys.readouterr()
+        code = main(["HEAD~1", "--fail-on", "affected>baseline", "--repo", str(branch)])
+        err = capsys.readouterr().err
+        assert code == 2
+        assert "taken against ref base and this run analyzes ref HEAD~1" in err
+        assert "not comparable" in err
+
+    def test_a_corrupt_baseline_is_an_error(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        (branch / ".changelens-baseline.json").write_text("{", encoding="utf-8")
+        assert main(["base", "--fail-on", "affected>baseline", "--repo", str(branch)]) == 2
+        assert "not valid JSON" in capsys.readouterr().err
+
+    def test_a_baseline_that_cannot_answer_the_condition_is_an_error(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Hand-written, or written by a version that counted something else.
+        (branch / ".changelens-baseline.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "spec": {"ref": "base", "staged": False},
+                    "confidence": "High",
+                    "metrics": {"affected": 2},
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert main(["base", "--fail-on", "tests>baseline", "--repo", str(branch)]) == 2
+        err = capsys.readouterr().err
+        assert "no 'tests' metric" in err
+        assert "--save-baseline" in err
+
+    def test_a_custom_path_is_written_and_read(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        where = branch / "ci" / "radius.json"
+        assert (
+            main(["base", "--save-baseline", "--baseline", str(where), "--repo", str(branch)]) == 0
+        )
+        assert "Baseline saved to ci/radius.json" in capsys.readouterr().out
+        grow(branch)
+        code = main(
+            [
+                "base",
+                "--fail-on",
+                "affected>baseline",
+                "--baseline",
+                str(where),
+                "--repo",
+                str(branch),
+            ]
+        )
+        assert code == 1
+        assert "baseline 2, +2" in capsys.readouterr().out
+
+    def test_baseline_path_without_a_reader_or_writer_is_a_usage_error(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # --baseline alone reads as "gate against this", and it does not gate.
+        code = main(
+            ["base", "--baseline", "x.json", "--fail-on", "affected>1", "--repo", str(branch)]
+        )
+        assert code == 2
+        assert "nothing here does either" in capsys.readouterr().err
+
+    def test_a_docs_only_range_does_not_overwrite_the_baseline(
+        self, git_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # All-zero counts saved here would make the next branch look like it
+        # invented the entire radius.
+        write_tree(git_repo, {"README.md": "hello\n", "pkg/__init__.py": ""})
+        commit_all(git_repo, "baseline")
+        write_tree(git_repo, {"README.md": "hello there\n"})
+        commit_all(git_repo, "docs")
+        kept = git_repo / ".changelens-baseline.json"
+        kept.write_text("sentinel", encoding="utf-8")
+        assert main(["HEAD~1", "--save-baseline", "--repo", str(git_repo)]) == 0
+        assert "Baseline not saved" in capsys.readouterr().out
+        assert kept.read_text(encoding="utf-8") == "sentinel"
+
+    def test_saving_and_gating_in_one_run(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # A failing gate does not stop the baseline being recorded: the run
+        # still measured the branch.
+        code = main(["base", "--fail-on", "affected>1", "--save-baseline", "--repo", str(branch)])
+        assert code == 1
+        out = capsys.readouterr().out
+        assert "Gate: failed" in out
+        assert "Baseline saved" in out
+        assert (branch / ".changelens-baseline.json").exists()
+
+    def test_an_unwritable_baseline_is_an_error_after_the_report(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        blocker = branch / "blocker"
+        blocker.write_text("not a directory", encoding="utf-8")
+        code = main(
+            [
+                "base",
+                "--save-baseline",
+                "--baseline",
+                str(blocker / "b.json"),
+                "--repo",
+                str(branch),
+            ]
+        )
+        captured = capsys.readouterr()
+        assert code == 2
+        assert "Change blast radius" in captured.out
+        assert "could not write the baseline" in captured.err
+
+    def test_staged_baselines_round_trip(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        write_tree(branch, {"pkg/core.py": "def run(n):\n    return n + 7\n"})
+        git(branch, "add", "-A")
+        assert main(["--staged", "--save-baseline", "--repo", str(branch)]) == 0
+        assert "staged changes: affected = 2" in capsys.readouterr().out
+        assert main(["--staged", "--fail-on", "affected>baseline", "--repo", str(branch)]) == 0
+        assert "baseline 2, no change" in capsys.readouterr().out
+
+    def test_json_carries_the_baseline_and_keeps_stdout_clean(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["base", "--save-baseline", "--repo", str(branch)]) == 0
+        capsys.readouterr()
+        grow(branch)
+        code = main(["base", "--json", "--fail-on", "affected>baseline", "--repo", str(branch)])
+        captured = capsys.readouterr()
+        assert code == 1
+        payload = json.loads(captured.out)
+        assert payload["schema_version"] == 3
+        assert payload["gate"]["baseline"]["spec"] == {"ref": "base", "staged": False}
+        assert payload["gate"]["baseline"]["metrics"]["affected"] == 2
+        condition = payload["gate"]["conditions"][0]
+        assert (condition["baseline"], condition["delta"]) == (2, 2)
+        assert condition["entered"] == ["lib.py", "tests/test_lib.py"]
+        assert "Gate: failed" in captured.err
+
+    def test_a_constant_gate_emits_exactly_what_it_always_did(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["base", "--json", "--fail-on", "affected>1", "--repo", str(branch)]) == 1
+        condition = json.loads(capsys.readouterr().out)["gate"]["conditions"][0]
+        assert set(condition) == {"expression", "metric", "operator", "value", "actual", "tripped"}
+
+    def test_the_save_note_goes_to_stderr_in_json_mode(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["base", "--json", "--save-baseline", "--repo", str(branch)]) == 0
+        captured = capsys.readouterr()
+        json.loads(captured.out)  # stdout stays parseable
+        assert "Baseline saved" in captured.err

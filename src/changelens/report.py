@@ -5,12 +5,25 @@ from __future__ import annotations
 import json
 import re
 
-from changelens.gate import CONFIDENCE, GateResult, metrics_of
+from changelens.gate import CONFIDENCE, ConditionResult, GateResult, metrics_of
 from changelens.impact import HIGH, Dependent, Report
 
 # 2 added the always-present "metrics" object and the "gate" object that
 # appears when --fail-on is used. Everything from version 1 is unchanged.
-JSON_SCHEMA_VERSION = 2
+# 3 added the "baseline" object and, on a condition that compares against a
+# baseline, its "baseline", "delta", and "entered" keys. A condition that
+# compares against a constant is byte-for-byte what version 2 emitted.
+JSON_SCHEMA_VERSION = 3
+
+# How a metric's new files should be described, per metric.
+_ENTERED_PHRASE = {
+    "changed": "changed here and not in the baseline",
+    "direct": "became direct dependents since the baseline",
+    "transitive": "became transitive dependents since the baseline",
+    "tests": "became relevant tests since the baseline",
+    "affected": "entered the radius since the baseline",
+}
+_ENTERED_SHOWN = 5
 
 
 def render_terminal(report: Report, gate: GateResult | None = None) -> str:
@@ -60,6 +73,17 @@ def render_terminal(report: Report, gate: GateResult | None = None) -> str:
     return "\n".join(lines)
 
 
+def _delta_text(result: ConditionResult) -> str:
+    """How the actual moved from the baseline, in the units of the metric."""
+    delta = result.delta
+    assert delta is not None
+    if result.condition.metric == CONFIDENCE:
+        # Confidence is a three-level risk scale, so a signed number would
+        # read as a quantity it is not. Higher rank means more risk.
+        return "worse" if delta > 0 else "better" if delta < 0 else "same"
+    return "no change" if delta == 0 else f"{delta:+d}"
+
+
 def render_gate(gate: GateResult) -> str:
     """The gate verdict as its own block, for the terminal or for stderr."""
     if gate.skipped:
@@ -71,7 +95,26 @@ def render_gate(gate: GateResult) -> str:
         mark = "FAIL" if result.tripped else "ok  "
         expression = result.condition.expression.ljust(width)
         metric = result.condition.metric
-        lines.append(f"  {mark}  {expression}  (actual: {metric} = {result.actual_text})")
+        actual = f"actual: {metric} = {result.actual_text}"
+        if result.baseline_text is not None:
+            actual += f", baseline {result.baseline_text}, {_delta_text(result)}"
+        lines.append(f"  {mark}  {expression}  ({actual})")
+        # Which files moved is the answer a reviewer actually needs, and it
+        # is only worth the space when the condition tripped upward.
+        if result.tripped and result.entered and (result.delta or 0) > 0:
+            phrase = _ENTERED_PHRASE.get(metric, "are new since the baseline")
+            noun = "file" if len(result.entered) == 1 else "files"
+            lines.append(f"        {len(result.entered)} {noun} {phrase}:")
+            lines.extend(f"          {path}" for path in result.entered[:_ENTERED_SHOWN])
+            if len(result.entered) > _ENTERED_SHOWN:
+                lines.append(f"          ... and {len(result.entered) - _ENTERED_SHOWN} more")
+    if (drifted := gate.confidence_drift) is not None:
+        lines.append(
+            f"  Note: the baseline read at {drifted} confidence and this run reads at "
+            f"{gate.confidence},"
+        )
+        lines.append("        so part of any movement here is edges becoming visible or going")
+        lines.append("        dark rather than impact changing.")
     if gate.understated:
         lines.append(
             f"  Note: confidence is {gate.confidence}, so the counts this gate read can be"
@@ -100,22 +143,40 @@ def render_json(report: Report, gate: GateResult | None = None) -> str:
 
 
 def _gate_dict(gate: GateResult) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "failed": gate.failed,
         "skipped": gate.skipped,
         "understated": gate.understated,
-        "conditions": [
-            {
-                "expression": r.condition.expression,
-                "metric": r.condition.metric,
-                "operator": r.condition.op,
-                "value": r.condition.value_text,
-                "actual": r.actual_text if r.condition.metric == CONFIDENCE else r.actual,
-                "tripped": r.tripped,
-            }
-            for r in gate.results
-        ],
+        "conditions": [_condition_dict(r) for r in gate.results],
     }
+    if gate.baseline is not None:
+        payload["baseline"] = {
+            "spec": {"ref": gate.baseline.spec.ref, "staged": gate.baseline.spec.staged},
+            "head": gate.baseline.head,
+            "created": gate.baseline.created,
+            "confidence": gate.baseline.confidence.lower(),
+            "metrics": dict(gate.baseline.metrics),
+        }
+    return payload
+
+
+def _condition_dict(result: ConditionResult) -> dict[str, object]:
+    is_confidence = result.condition.metric == CONFIDENCE
+    payload: dict[str, object] = {
+        "expression": result.condition.expression,
+        "metric": result.condition.metric,
+        "operator": result.condition.op,
+        "value": result.condition.value_text,
+        "actual": result.actual_text if is_confidence else result.actual,
+        "tripped": result.tripped,
+    }
+    # Only a relative condition carries these, so a constant-threshold gate
+    # emits exactly what schema version 2 emitted.
+    if result.condition.relative:
+        payload["baseline"] = result.baseline_text if is_confidence else result.baseline
+        payload["delta"] = _delta_text(result) if is_confidence else result.delta
+        payload["entered"] = list(result.entered)
+    return payload
 
 
 def _dep_dict(dep: Dependent) -> dict[str, object]:

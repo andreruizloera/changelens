@@ -1,0 +1,13 @@
+diff --git a/payments/money.py b/payments/money.py
+index 9c8a774..6522ae5 100644
+--- a/payments/money.py
++++ b/payments/money.py
+@@ -1,6 +1,6 @@
+ """Money formatting shared by the billing side of the system."""
+ 
+ 
+-def format_cents(cents: int) -> str:
++def format_cents(cents: int, symbol: str = "$") -> str:
+     sign = "-" if cents < 0 else ""
+-    return f"{sign}${abs(cents) // 100}.{abs(cents) % 100:02d}"
++    return f"{sign}{symbol}{abs(cents) // 100}.{abs(cents) % 100:02d}"

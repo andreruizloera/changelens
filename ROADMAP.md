@@ -7,12 +7,15 @@ Honest future work. None of this is implemented yet.
 - **TypeScript analyzer.** Second implementation of the
   `LanguageAnalyzer` protocol (ES module and CommonJS imports,
   tsconfig path aliases), which will also pressure-test the interface.
-- **Baseline gating.** Compare against a stored report so `--fail-on` can
-  trip on growth ("this branch widened the radius by 10 files") rather
-  than only on an absolute threshold that a large repository crosses on
-  every pull request.
 - **Ref range syntax.** Accept `A..B` and `A...B` directly instead of
   always comparing against HEAD.
+- **Percentage baselines.** `--fail-on "affected>baseline+25%"`, for
+  repositories where a fixed file count is the wrong unit at both ends of
+  the size range. Baseline gating itself shipped; see the README.
+- **Baseline provenance checks.** A baseline records the commit it was
+  taken at and nothing verifies it. Check that the recorded commit is an
+  ancestor of this run's HEAD, and say so when it is not, so an unrelated
+  baseline stops reading as a real comparison.
 - **`--tests-only` output.** Print just the relevant test paths,
   newline-separated, for piping straight into `pytest`.
 
