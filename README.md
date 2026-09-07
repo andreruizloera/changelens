@@ -406,13 +406,18 @@ $ echo $?
 2
 ```
 
-Three findings are kept apart, because they call for different fixes:
+Findings are kept apart rather than collapsed into one message, because they
+call for different fixes:
 
 | finding | what it means |
 | --- | --- |
 | not an ancestor | a real commit on divergent history, usually another branch |
 | not in this repository | a shallow clone, a force-push, or a rebase dropped it |
 | no commit recorded | a hand-written baseline, or one from a repo with no commits |
+| no HEAD to compare | this run has no commits, so there is no history to check against |
+
+The first is the one you can act on directly; the other three all mean the
+question could not be answered, which is different from answering it "no".
 
 The baseline file also records the timestamp it was taken at and the
 changelens version that wrote it. Those stay provenance for a human to read.
