@@ -9,14 +9,14 @@ numbers written to a file, and a condition can compare against it:
 
 Two reports are only comparable when they answer the same question, so a
 baseline records the SPEC it was taken with (the ref, or --staged) and a run
-refuses to compare against a baseline taken with a different one. What
-changelens cannot check is that the baseline came from the same repository
-or the same branch: the file records a HEAD sha and a timestamp as
-provenance for a human, and nothing here verifies them.
+refuses to compare against a baseline taken with a different one. It also
+records the commit it was taken at, and a run checks that commit against its
+own history: see Provenance below and check_provenance in gitdiff.py.
 
 This module is the data and its file format. It knows nothing about reports,
 metrics, or git; gate.py builds a Baseline out of a Report and decides what a
-metric name means.
+metric name means, and gitdiff.py is the module that asks git the provenance
+question and hands back the Provenance defined here.
 """
 
 from __future__ import annotations
@@ -61,9 +61,81 @@ class Baseline:
     confidence: str
     spec: Spec = field(default_factory=Spec)
     files: FileSets = field(default_factory=dict)
-    head: str | None = None  # provenance only; never verified
+    head: str | None = None  # the commit it was taken at; see Provenance
     created: str | None = None
     version: str | None = None
+
+
+# Where the baseline's recorded commit sits relative to this run.
+VERIFIED = "verified"  # an ancestor of this run's HEAD: a real comparison
+NOT_ANCESTOR = "not_ancestor"  # a real commit, but on divergent history
+UNKNOWN_COMMIT = "unknown_commit"  # not in this repository at all
+NOT_RECORDED = "not_recorded"  # the baseline names no commit
+NO_HEAD = "no_head"  # this run has no HEAD to compare against
+
+_SHORT = 7
+
+
+def _short(sha: str | None) -> str:
+    return "an unrecorded commit" if sha is None else sha[:_SHORT]
+
+
+@dataclass(frozen=True)
+class Provenance:
+    """Whether a baseline was taken somewhere this run descends from.
+
+    A baseline from an unrelated branch, or from before a history rewrite,
+    reads exactly like a real comparison and produces a verdict about
+    nothing. Checking the recorded commit is what separates the two.
+
+    "Not an ancestor" and "not in this repository" are kept apart on purpose.
+    The first is a live commit on divergent history, which is what a branch
+    that forked before the baseline was taken looks like, and is often a
+    comparison the user meant to make. The second is a shallow clone, a
+    force-push, or a rebase, and nothing at all can be said about it.
+    """
+
+    status: str
+    recorded: str | None = None  # the commit the baseline was taken at
+    current: str | None = None  # this run's HEAD
+
+    @property
+    def ok(self) -> bool:
+        return self.status == VERIFIED
+
+    @property
+    def label(self) -> str | None:
+        """How the verdict should be qualified, or None when it stands alone."""
+        if self.ok:
+            return None
+        if self.status == NOT_ANCESTOR:
+            return "baseline is not from this history"
+        return "baseline provenance unverified"
+
+    def describe(self) -> str:
+        """One sentence: what was found, and why it matters. No advice."""
+        if self.status == NOT_ANCESTOR:
+            return (
+                f"the baseline was taken at commit {_short(self.recorded)}, which is not an "
+                f"ancestor of this run's HEAD ({_short(self.current)}), so the two runs sit "
+                f"on divergent history and these numbers may be comparing two different "
+                f"branches rather than measuring growth"
+            )
+        if self.status == UNKNOWN_COMMIT:
+            return (
+                f"the baseline was taken at commit {_short(self.recorded)}, which is not in "
+                f"this repository at all, which is what a shallow clone, a force-push, or a "
+                f"rebase leaves behind, so nothing about where it came from can be checked"
+            )
+        if self.status == NO_HEAD:
+            return (
+                f"the baseline was taken at commit {_short(self.recorded)}, and this run has "
+                f"no HEAD commit to compare it against, so its provenance cannot be checked"
+            )
+        return (
+            "the baseline records no commit, so where it was taken cannot be checked; "
+            "baselines written by changelens 0.1.0 and later record one"
+        )
 
 
 def to_dict(baseline: Baseline) -> dict[str, object]:

@@ -82,7 +82,7 @@ def test_terminal_report_empty_sections() -> None:
 
 def test_json_schema() -> None:
     payload = json.loads(render_json(sample_report()))
-    assert payload["schema_version"] == 4
+    assert payload["schema_version"] == 5
     assert set(payload) == {
         "schema_version",
         "changed",

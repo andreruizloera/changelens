@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import textwrap
 
 from changelens.gate import CONFIDENCE, ConditionResult, GateResult, metrics_of
 from changelens.impact import HIGH, Dependent, Report
@@ -16,7 +17,9 @@ from changelens.impact import HIGH, Dependent, Report
 # 4 added "threshold" on a condition whose offset is a percentage, the count
 # that percentage worked out to. Conditions written without a percentage are
 # byte-for-byte what version 3 emitted.
-JSON_SCHEMA_VERSION = 4
+# 5 added "provenance" inside the "baseline" object: where the baseline's
+# recorded commit sits relative to this run's HEAD.
+JSON_SCHEMA_VERSION = 5
 
 # How a metric's new files should be described, per metric.
 _ENTERED_PHRASE = {
@@ -27,6 +30,14 @@ _ENTERED_PHRASE = {
     "affected": "entered the radius since the baseline",
 }
 _ENTERED_SHOWN = 5
+_WARNING_WIDTH = 78
+
+# What to do about a baseline whose provenance did not check out. The gate
+# still reports its numbers, so the reader needs the two ways out of it.
+_PROVENANCE_ADVICE = (
+    "Re-save the baseline from this branch, or pass --require-baseline-ancestor "
+    "to make this an error instead of a warning."
+)
 
 
 def render_terminal(report: Report, gate: GateResult | None = None) -> str:
@@ -87,12 +98,34 @@ def _delta_text(result: ConditionResult) -> str:
     return "no change" if delta == 0 else f"{delta:+d}"
 
 
+def _warning_lines(text: str) -> list[str]:
+    """A warning wrapped under a hanging "Warning:" label.
+
+    Hyphens do not break: a flag name split across two lines is a flag name
+    someone pastes into a shell wrong.
+    """
+    return textwrap.wrap(
+        text,
+        width=_WARNING_WIDTH,
+        initial_indent="  Warning: ",
+        subsequent_indent="           ",
+        break_on_hyphens=False,
+        break_long_words=False,
+    )
+
+
 def render_gate(gate: GateResult) -> str:
     """The gate verdict as its own block, for the terminal or for stderr."""
     if gate.skipped:
         return "Gate: skipped (no Python changes to measure)"
 
-    lines = [f"Gate: {'failed' if gate.failed else 'passed'}"]
+    verdict = "failed" if gate.failed else "passed"
+    # An unverified baseline does not change the verdict, so it qualifies it:
+    # a reader must not be able to quote "Gate: passed" out of this block
+    # without also quoting the reason it may mean nothing.
+    if (unverified := gate.unverified) is not None:
+        verdict += f" ({unverified.label})"
+    lines = [f"Gate: {verdict}"]
     width = max(len(r.condition.expression) for r in gate.results) if gate.results else 0
     for result in gate.results:
         mark = "FAIL" if result.tripped else "ok  "
@@ -115,6 +148,8 @@ def render_gate(gate: GateResult) -> str:
             lines.extend(f"          {path}" for path in result.entered[:_ENTERED_SHOWN])
             if len(result.entered) > _ENTERED_SHOWN:
                 lines.append(f"          ... and {len(result.entered) - _ENTERED_SHOWN} more")
+    if unverified is not None:
+        lines.extend(_warning_lines(f"{unverified.describe()}. {_PROVENANCE_ADVICE}"))
     if (drifted := gate.confidence_drift) is not None:
         lines.append(
             f"  Note: the baseline read at {drifted} confidence and this run reads at "
@@ -157,13 +192,20 @@ def _gate_dict(gate: GateResult) -> dict[str, object]:
         "conditions": [_condition_dict(r) for r in gate.results],
     }
     if gate.baseline is not None:
-        payload["baseline"] = {
+        baseline: dict[str, object] = {
             "spec": {"ref": gate.baseline.spec.ref, "staged": gate.baseline.spec.staged},
             "head": gate.baseline.head,
             "created": gate.baseline.created,
             "confidence": gate.baseline.confidence.lower(),
             "metrics": dict(gate.baseline.metrics),
         }
+        if gate.provenance is not None:
+            baseline["provenance"] = {
+                "status": gate.provenance.status,
+                "verified": gate.provenance.ok,
+                "head": gate.provenance.current,
+            }
+        payload["baseline"] = baseline
     return payload
 
 

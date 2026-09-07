@@ -122,6 +122,58 @@ if [ "$AT_STATUS" -ne 0 ]; then
     exit 1
 fi
 
+# A baseline from somewhere this branch does not descend from: the same ref,
+# the same repository, the same numbers, and a comparison that means nothing.
+# This is what a cached CI artifact from another branch looks like.
+"${GIT[@]}" checkout -q -b sidequest base
+git apply "$HERE/examples/demo-change.patch"
+git apply "$HERE/examples/demo-change-2.patch"
+"${GIT[@]}" add .
+"${GIT[@]}" commit -qm "unrelated work, same two files"
+"${RUN[@]}" base --save-baseline >/dev/null
+"${GIT[@]}" checkout -q -
+
+echo
+echo "\$ changelens base --fail-on \"affected>baseline\"   # baseline from another branch"
+echo
+set +e
+UNRELATED="$("${RUN[@]}" base --fail-on "affected>baseline")"
+UNRELATED_STATUS=$?
+STRICT_ERR="$("${RUN[@]}" base --fail-on "affected>baseline" --require-baseline-ancestor 2>&1 >/dev/null)"
+STRICT_STATUS=$?
+set -e
+echo "..."
+echo "$UNRELATED" | tail -n 8
+echo
+echo "\$ echo \$?"
+echo "$UNRELATED_STATUS"
+
+echo
+echo "\$ changelens base --fail-on \"affected>baseline\" --require-baseline-ancestor"
+echo "$STRICT_ERR"
+echo
+echo "\$ echo \$?"
+echo "$STRICT_STATUS"
+
+# The counts match exactly, so without the provenance check this reads as a
+# branch that widened nothing. The exit code is still the gate's own.
+if [ "$UNRELATED_STATUS" -ne 0 ]; then
+    echo "demo: expected the unrelated-baseline gate to pass with exit 0, got $UNRELATED_STATUS" >&2
+    exit 1
+fi
+if [ "$STRICT_STATUS" -ne 2 ]; then
+    echo "demo: expected --require-baseline-ancestor to exit 2, got $STRICT_STATUS" >&2
+    exit 1
+fi
+case "$UNRELATED" in
+    *"Gate: passed (baseline is not from this history)"*) ;;
+    *) echo "demo: the unrelated baseline was not flagged in the verdict" >&2; exit 1 ;;
+esac
+case "$STRICT_ERR" in
+    *"--require-baseline-ancestor was passed"*) ;;
+    *) echo "demo: --require-baseline-ancestor did not name itself in its error" >&2; exit 1 ;;
+esac
+
 # Everything the README pastes for these steps, checked against what the tool
 # just printed. If a line here drifts, CI goes red instead of the docs quietly
 # going stale.
@@ -134,11 +186,20 @@ EXPECTED=(
     "tests/test_statements.py"
     "FAIL  affected>baseline+25%  (actual: affected = 9, baseline 6, +3, threshold 7.5)"
     "ok    affected>baseline+50%  (actual: affected = 9, baseline 6, +3, threshold 9)"
+    "Gate: passed (baseline is not from this history)"
+    "  ok    affected>baseline  (actual: affected = 9, baseline 9, no change)"
+    # The two lines carrying commit shas differ every run, so the wrapped
+    # remainder is what can be pinned.
+    "           history and these numbers may be comparing two different branches"
+    "           rather than measuring growth. Re-save the baseline from this"
+    "           branch, or pass --require-baseline-ancestor to make this an error"
+    "           instead of a warning."
 )
 BOTH="$SAVED
 $GROWN
 $PCT_OVER
-$PCT_AT"
+$PCT_AT
+$UNRELATED"
 for line in "${EXPECTED[@]}"; do
     # A here-string, not a pipe: `set -o pipefail` would otherwise turn the
     # SIGPIPE from a matching `grep -q` into a failure.

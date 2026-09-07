@@ -9,10 +9,6 @@ Honest future work. None of this is implemented yet.
   tsconfig path aliases), which will also pressure-test the interface.
 - **Ref range syntax.** Accept `A..B` and `A...B` directly instead of
   always comparing against HEAD.
-- **Baseline provenance checks.** A baseline records the commit it was
-  taken at and nothing verifies it. Check that the recorded commit is an
-  ancestor of this run's HEAD, and say so when it is not, so an unrelated
-  baseline stops reading as a real comparison.
 - **`--tests-only` output.** Print just the relevant test paths,
   newline-separated, for piping straight into `pytest`.
 

@@ -27,7 +27,14 @@ from changelens.gate import (
     needs_baseline,
     parse_conditions,
 )
-from changelens.gitdiff import GitError, diff_against_ref, diff_staged, head_sha, repo_root
+from changelens.gitdiff import (
+    GitError,
+    check_provenance,
+    diff_against_ref,
+    diff_staged,
+    head_sha,
+    repo_root,
+)
 from changelens.impact import Report, analyze
 from changelens.report import render_gate, render_json, render_mermaid, render_terminal
 
@@ -86,6 +93,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help=f"baseline file to read and write (default: {DEFAULT_FILENAME} at the repo root)",
     )
+    parser.add_argument(
+        "--require-baseline-ancestor",
+        action="store_true",
+        help=(
+            "refuse (exit 2) instead of warning when the baseline's commit is not an\n"
+            "ancestor of this run's HEAD, or is not in this repository at all"
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"changelens {__version__}")
     return parser
 
@@ -138,6 +153,16 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return EXIT_USAGE
+    if args.require_baseline_ancestor and not wants_baseline:
+        # The flag would silently check nothing, which reads in a pipeline as
+        # a guarantee that is not being made.
+        print(
+            "error: --require-baseline-ancestor checks the baseline a condition compares "
+            "against, and no condition here compares against one; add --fail-on "
+            '"affected>baseline+10", or drop the flag',
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
 
     try:
         root = repo_root(args.repo or Path.cwd())
@@ -148,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     spec = Spec(ref=args.ref, staged=bool(args.staged))
     path = _baseline_path(root, args.baseline)
     baseline = None
+    provenance = None
     if wants_baseline:
         # A relative condition with no usable baseline is an error, never a
         # pass: waving a branch through because a file was missing is exactly
@@ -183,6 +209,20 @@ def main(argv: list[str] | None = None) -> int:
         except GateError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return EXIT_USAGE
+        # A baseline from unrelated history reads exactly like a real
+        # comparison. By default that is a loud warning printed with the
+        # verdict, because a branch that forked before the baseline was taken
+        # is a legitimate comparison and a gate that refuses it gets deleted.
+        # --require-baseline-ancestor is for pipelines that would rather stop.
+        provenance = check_provenance(root, baseline)
+        if args.require_baseline_ancestor and not provenance.ok:
+            print(
+                f"error: {provenance.describe()}, and --require-baseline-ancestor was "
+                f"passed. Re-save the baseline at {_shown(root, path)} from this branch, "
+                f"or drop the flag to gate on it with a warning instead.",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
 
     try:
         diffs = diff_staged(root) if args.staged else diff_against_ref(root, args.ref)
@@ -192,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
 
     report = analyze(root, diffs, staged=args.staged) if diffs else Report()
     try:
-        gate = evaluate(report, conditions, baseline) if conditions else None
+        gate = evaluate(report, conditions, baseline, provenance) if conditions else None
     except GateError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE

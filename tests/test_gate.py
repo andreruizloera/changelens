@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import pytest
 
-from changelens.baseline import Baseline, Spec
+from changelens.baseline import (
+    NOT_ANCESTOR,
+    NOT_RECORDED,
+    UNKNOWN_COMMIT,
+    VERIFIED,
+    Baseline,
+    Provenance,
+    Spec,
+)
 from changelens.gate import (
     GateError,
     baseline_from,
@@ -16,6 +24,11 @@ from changelens.gate import (
 )
 from changelens.impact import HIGH, LOW, MEDIUM, ChangedSymbol, Dependent, Report
 from changelens.report import render_gate
+
+
+def flat(text: str) -> str:
+    """Rendered text with its line wrapping collapsed, for asserting sentences."""
+    return " ".join(text.split())
 
 
 def build_report(
@@ -546,6 +559,27 @@ class TestBaselineEvaluation:
         )
         assert gate.confidence_drift is None
 
+    def test_a_skipped_gate_does_not_warn_about_provenance(self) -> None:
+        # Nothing was compared, so nothing could have been misled.
+        gate = evaluate(
+            Report(ignored_files=["README.md"]),
+            parse_conditions(["affected>baseline"]),
+            baseline_of(direct=5),
+            Provenance(NOT_ANCESTOR, "a" * 40, "b" * 40),
+        )
+        assert gate.skipped
+        assert gate.unverified is None
+
+    def test_a_constant_only_gate_does_not_warn_about_provenance(self) -> None:
+        # The baseline was loaded for another condition; this one ignores it.
+        gate = evaluate(
+            build_report(direct=1),
+            parse_conditions(["affected>99"]),
+            baseline_of(direct=5),
+            Provenance(NOT_ANCESTOR, "a" * 40, "b" * 40),
+        )
+        assert gate.unverified is None
+
     def test_no_drift_note_for_a_constant_only_gate(self) -> None:
         # The baseline was loaded for another condition; this one does not use it.
         gate = evaluate(
@@ -620,6 +654,54 @@ class TestBaselineRendering:
             baseline_of(confidence=HIGH),
         )
         assert "(actual: confidence = low, baseline high, worse)" in render_gate(gate)
+
+    def test_an_unverified_baseline_qualifies_the_verdict_and_warns(self) -> None:
+        # The dangerous case: a bogus baseline that makes a branch look clean.
+        gate = evaluate(
+            build_report(direct=1),
+            parse_conditions(["affected>baseline"]),
+            baseline_of(direct=5),
+            Provenance(NOT_ANCESTOR, "a" * 40, "b" * 40),
+        )
+        text = flat(render_gate(gate))
+        assert not gate.failed
+        assert "Gate: passed (baseline is not from this history)" in text
+        assert "Warning: the baseline was taken at commit aaaaaaa" in text
+        assert "not an ancestor of this run's HEAD (bbbbbbb)" in text
+        assert "--require-baseline-ancestor" in text
+
+    def test_a_failing_gate_is_qualified_too(self) -> None:
+        # A comparison against unrelated history is meaningless in both
+        # directions, so a red build gets the same caveat as a green one.
+        gate = evaluate(
+            build_report(direct=9),
+            parse_conditions(["affected>baseline"]),
+            baseline_of(direct=1),
+            Provenance(UNKNOWN_COMMIT, "a" * 40, "b" * 40),
+        )
+        assert gate.failed
+        assert "Gate: failed (baseline provenance unverified)" in render_gate(gate)
+
+    def test_a_verified_baseline_says_nothing(self) -> None:
+        gate = evaluate(
+            build_report(direct=1),
+            parse_conditions(["affected>baseline"]),
+            baseline_of(direct=1),
+            Provenance(VERIFIED, "a" * 40, "b" * 40),
+        )
+        text = render_gate(gate)
+        assert text.startswith("Gate: passed\n")
+        assert "Warning" not in text
+
+    def test_the_flag_name_survives_the_wrapping(self) -> None:
+        # Wrapped across two lines it is a flag someone pastes in wrong.
+        gate = evaluate(
+            build_report(direct=1),
+            parse_conditions(["affected>baseline"]),
+            baseline_of(direct=5),
+            Provenance(NOT_RECORDED, None, "b" * 40),
+        )
+        assert any("--require-baseline-ancestor" in line for line in render_gate(gate).splitlines())
 
     def test_the_drift_note_is_rendered(self) -> None:
         gate = evaluate(

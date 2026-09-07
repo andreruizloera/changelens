@@ -30,6 +30,8 @@ Five rules here are judgement calls and are documented rather than hidden:
   and it is evaluated in exact integer arithmetic (both sides scaled by 100)
   so no rounding rule has to be invented or remembered. A run sitting exactly
   on the threshold does not trip `>`.
+- A baseline from unrelated history WARNS and qualifies the verdict rather
+  than failing the gate. See GateResult.unverified and baseline.Provenance.
 
 This module is pure: it reads a Report and returns data. Rendering lives in
 report.py.
@@ -42,7 +44,7 @@ import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 
-from changelens.baseline import Baseline, FileSets, Spec
+from changelens.baseline import Baseline, FileSets, Provenance, Spec
 from changelens.impact import HIGH, LOW, MEDIUM, Report
 
 # Ordered by risk, not by name, so comparisons read as "at least this bad".
@@ -126,6 +128,22 @@ class GateResult:
     skipped: bool
     files: FileSets = field(default_factory=dict)
     baseline: Baseline | None = None
+    # Where the baseline came from, when one was loaded. gitdiff.py answers
+    # the git question; this module only carries the answer to the renderer.
+    provenance: Provenance | None = None
+
+    @property
+    def unverified(self) -> Provenance | None:
+        """The provenance to warn about, when it is worth warning about.
+
+        A comparison that never happened cannot be misled by a bad baseline,
+        so a skipped gate and a gate with no relative condition stay quiet.
+        """
+        if self.provenance is None or self.provenance.ok or self.skipped:
+            return None
+        if not any(r.condition.relative for r in self.results):
+            return None
+        return self.provenance
 
     @property
     def failed(self) -> bool:
@@ -374,6 +392,7 @@ def evaluate(
     report: Report,
     conditions: Sequence[Condition],
     baseline: Baseline | None = None,
+    provenance: Provenance | None = None,
 ) -> GateResult:
     metrics = metrics_of(report)
     sets = file_sets_of(report)
@@ -433,4 +452,5 @@ def evaluate(
         skipped=skipped,
         files=sets,
         baseline=baseline,
+        provenance=provenance,
     )

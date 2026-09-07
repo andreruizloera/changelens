@@ -2,7 +2,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from changelens.gitdiff import diff_against_ref, diff_staged, parse_unified_diff
+from changelens.baseline import (
+    NO_HEAD,
+    NOT_ANCESTOR,
+    NOT_RECORDED,
+    UNKNOWN_COMMIT,
+    VERIFIED,
+    Baseline,
+    Spec,
+)
+from changelens.gitdiff import (
+    check_provenance,
+    commit_exists,
+    diff_against_ref,
+    diff_staged,
+    head_sha,
+    is_ancestor,
+    parse_unified_diff,
+)
 from tests.conftest import commit_all, git, write_tree
 
 SAMPLE_DIFF = """\
@@ -75,3 +92,80 @@ def test_diff_staged_real_repo(git_repo: Path) -> None:
     diffs = diff_staged(git_repo)
     assert len(diffs) == 1
     assert diffs[0].changed_lines == {1}
+
+
+ABSENT_SHA = "0" * 40
+
+
+def baseline_at(head: str | None) -> Baseline:
+    return Baseline(metrics={"affected": 1}, confidence="High", spec=Spec(ref="base"), head=head)
+
+
+class TestProvenance:
+    def test_the_previous_commit_is_an_ancestor(self, git_repo: Path) -> None:
+        write_tree(git_repo, {"a.py": "x = 1\n"})
+        commit_all(git_repo)
+        first = head_sha(git_repo)
+        assert first is not None
+        write_tree(git_repo, {"a.py": "x = 2\n"})
+        commit_all(git_repo)
+        provenance = check_provenance(git_repo, baseline_at(first))
+        assert provenance.status == VERIFIED
+        assert provenance.ok
+        assert (provenance.recorded, provenance.current) == (first, head_sha(git_repo))
+
+    def test_head_itself_is_an_ancestor_of_head(self, git_repo: Path) -> None:
+        write_tree(git_repo, {"a.py": "x = 1\n"})
+        commit_all(git_repo)
+        assert check_provenance(git_repo, baseline_at(head_sha(git_repo))).ok
+
+    def test_a_commit_on_a_divergent_branch_is_not_an_ancestor(self, git_repo: Path) -> None:
+        # The shape of a baseline saved on one branch and used on another.
+        write_tree(git_repo, {"a.py": "x = 1\n"})
+        commit_all(git_repo)
+        git(git_repo, "branch", "other")
+        git(git_repo, "checkout", "-q", "other")
+        write_tree(git_repo, {"a.py": "x = 2\n"})
+        commit_all(git_repo)
+        elsewhere = head_sha(git_repo)
+        git(git_repo, "checkout", "-q", "-")
+        write_tree(git_repo, {"a.py": "x = 3\n"})
+        commit_all(git_repo)
+        provenance = check_provenance(git_repo, baseline_at(elsewhere))
+        assert provenance.status == NOT_ANCESTOR
+        assert not provenance.ok
+
+    def test_a_commit_this_repository_never_had_is_its_own_status(self, git_repo: Path) -> None:
+        # A shallow clone, a force-push, or a rebase leaves this behind, and
+        # it is a different finding from "on another branch".
+        write_tree(git_repo, {"a.py": "x = 1\n"})
+        commit_all(git_repo)
+        assert check_provenance(git_repo, baseline_at(ABSENT_SHA)).status == UNKNOWN_COMMIT
+
+    def test_a_baseline_with_no_recorded_commit(self, git_repo: Path) -> None:
+        write_tree(git_repo, {"a.py": "x = 1\n"})
+        commit_all(git_repo)
+        assert check_provenance(git_repo, baseline_at(None)).status == NOT_RECORDED
+
+    def test_a_repository_with_no_commits_says_so(self, git_repo: Path) -> None:
+        assert check_provenance(git_repo, baseline_at("a" * 40)).status == NO_HEAD
+
+    def test_commit_exists_answers_yes_and_no(self, git_repo: Path) -> None:
+        write_tree(git_repo, {"a.py": "x = 1\n"})
+        commit_all(git_repo)
+        sha = head_sha(git_repo)
+        assert sha is not None
+        assert commit_exists(git_repo, sha)
+        assert not commit_exists(git_repo, ABSENT_SHA)
+        assert not commit_exists(git_repo, "not-a-ref-at-all")
+
+    def test_is_ancestor_is_directional(self, git_repo: Path) -> None:
+        write_tree(git_repo, {"a.py": "x = 1\n"})
+        commit_all(git_repo)
+        first = head_sha(git_repo)
+        write_tree(git_repo, {"a.py": "x = 2\n"})
+        commit_all(git_repo)
+        second = head_sha(git_repo)
+        assert first is not None and second is not None
+        assert is_ancestor(git_repo, first, second)
+        assert not is_ancestor(git_repo, second, first)

@@ -99,6 +99,7 @@ changelens main --fail-on "affected>20"    # exit 1 if the radius is wide
 changelens main --save-baseline            # record this radius for later
 changelens main --fail-on "affected>baseline+10"   # exit 1 if it widened
 changelens main --fail-on "affected>baseline+25%"  # or widened by a quarter
+changelens main --fail-on "affected>baseline" --require-baseline-ancestor
 ```
 
 The mermaid output pastes directly into GitHub comments, GitLab, and
@@ -172,7 +173,10 @@ Gate: passed
 ```
 
 Exit codes: `0` clean, `1` a gate condition tripped, `2` a usage, git, or
-baseline error. A bad expression is rejected before git runs.
+baseline error. A bad expression is rejected before git runs. Nothing else
+moves the exit code: a warning about where a baseline came from stays a
+warning unless you ask for more, and [Where the baseline came
+from](#where-the-baseline-came-from) says how.
 
 With `--json` or `--mermaid` the gate block goes to stderr so stdout stays
 machine-readable, and the JSON report carries `metrics` and a `gate`
@@ -309,10 +313,76 @@ than left to be discovered:
   different confidence levels, the gate says so, since some of the movement
   in the numbers is then edges becoming visible rather than impact changing.
 
-The baseline file also records the HEAD sha and the timestamp it was taken
-at. Those are provenance for a human: changelens does not verify that a
-baseline came from the same repository, the same branch, or an ancestor
-commit, and it cannot tell you if you point it at an unrelated one.
+### Where the baseline came from
+
+A baseline that is real, readable, and taken against the same ref can still
+be a comparison against nothing: a cached CI artifact from a different
+branch, or one written before the history was rewritten. Its numbers land in
+the report looking exactly like a real measurement.
+
+So changelens checks the commit the baseline recorded against this run's
+history, with `git merge-base --is-ancestor`. This is the fifth part of
+`./demo.sh`. A baseline is saved on a side branch, and the branch that gates
+against it affects the same 9 files, so the gate reads perfectly flat:
+
+```
+$ changelens base --fail-on "affected>baseline"   # baseline from another branch
+
+...
+Gate: passed (baseline is not from this history)
+  ok    affected>baseline  (actual: affected = 9, baseline 9, no change)
+  Warning: the baseline was taken at commit b790fea, which is not an ancestor
+           of this run's HEAD (11c55f7), so the two runs sit on divergent
+           history and these numbers may be comparing two different branches
+           rather than measuring growth. Re-save the baseline from this
+           branch, or pass --require-baseline-ancestor to make this an error
+           instead of a warning.
+
+$ echo $?
+0
+```
+
+(The commit shas are from that run of the demo, and differ on yours because
+the demo builds its repository fresh each time. The lines that carry no sha
+are checked against the tool's real output by `demo.sh` in CI, so this block
+cannot go stale quietly.)
+
+**The default is a warning and a qualified verdict, not a refusal.** A branch
+that forked before the baseline was taken is a legitimate comparison, and it
+is not an ancestor either, so refusing outright would fire on ordinary work
+and the gate would get deleted, which is the same argument this whole section
+makes about absolute thresholds. What must not happen is a bogus baseline
+reading as a clean bill of health, and it cannot here: the verdict line
+itself carries the reason, so `Gate: passed` cannot be quoted out of the
+block without it.
+
+**The exit code stays the gate's own.** 0 or 1 says whether the conditions
+tripped, and provenance never changes it silently. To make it a build
+failure, ask for that: `--require-baseline-ancestor` exits 2 with the same
+sentence, before any analysis runs, and is the one line to add to a pipeline
+that would rather stop than read a warning.
+
+```
+$ changelens base --fail-on "affected>baseline" --require-baseline-ancestor
+error: the baseline was taken at commit b790fea, which is not an ancestor of this run's HEAD (11c55f7), so the two runs sit on divergent history and these numbers may be comparing two different branches rather than measuring growth, and --require-baseline-ancestor was passed. Re-save the baseline at .changelens-baseline.json from this branch, or drop the flag to gate on it with a warning instead.
+
+$ echo $?
+2
+```
+
+Three findings are kept apart, because they call for different fixes:
+
+| finding | what it means |
+| --- | --- |
+| not an ancestor | a real commit on divergent history, usually another branch |
+| not in this repository | a shallow clone, a force-push, or a rebase dropped it |
+| no commit recorded | a hand-written baseline, or one from a repo with no commits |
+
+The baseline file also records the timestamp it was taken at and the
+changelens version that wrote it. Those stay provenance for a human to read.
+What is still not checked is that the baseline came from the *same
+repository*: a baseline copied between two clones that share history passes
+the ancestry check.
 
 `--baseline PATH` puts the file somewhere else (both to write and to read).
 In CI, cache it per branch and decide for yourself what a first run means:
@@ -373,7 +443,8 @@ src/changelens/
   graph.py             repository-wide import graph construction
   impact.py            dependent discovery, ranking, confidence heuristic
   gate.py              --fail-on expressions, metrics, pass/fail decision
-  baseline.py          the saved-report file format and its comparability
+  baseline.py          the saved-report file format, its comparability,
+                       and what its recorded commit turned out to be
   report.py            terminal, JSON, and mermaid renderers
 ```
 
@@ -405,9 +476,9 @@ you when its own inputs were degraded, but it cannot see:
   `src/` directory
 - non-Python files; changed ones are listed as ignored, never silently
   dropped
-- whether a baseline came from this repository or this branch; the spec it
-  was taken with is checked, the commit it was taken at is recorded and not
-  verified
+- whether a baseline came from this *repository*; the spec it was taken with
+  and the ancestry of the commit it was taken at are both checked, but two
+  clones sharing history are indistinguishable here
 
 Treat "Potentially affected" as a review checklist, not a verdict, and
 read the confidence reasons before trusting a Low-confidence report.

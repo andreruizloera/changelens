@@ -392,7 +392,7 @@ class TestBaseline:
         captured = capsys.readouterr()
         assert code == 1
         payload = json.loads(captured.out)
-        assert payload["schema_version"] == 4
+        assert payload["schema_version"] == 5
         assert payload["gate"]["baseline"]["spec"] == {"ref": "base", "staged": False}
         assert payload["gate"]["baseline"]["metrics"]["affected"] == 2
         condition = payload["gate"]["conditions"][0]
@@ -448,10 +448,21 @@ class TestBaseline:
         code = main(["base", "--json", "--fail-on", "affected>baseline+25%", "--repo", str(branch)])
         assert code == 1
         payload = json.loads(capsys.readouterr().out)
-        assert payload["schema_version"] == 4
+        assert payload["schema_version"] == 5
         condition = payload["gate"]["conditions"][0]
         assert condition["value"] == "baseline+25%"
         assert condition["threshold"] == "2.5"
+
+    def test_a_baseline_from_this_history_says_nothing(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["base", "--save-baseline", "--repo", str(branch)]) == 0
+        capsys.readouterr()
+        grow(branch)
+        assert main(["base", "--fail-on", "affected>baseline", "--repo", str(branch)]) == 1
+        out = capsys.readouterr().out
+        assert "Gate: failed\n" in out
+        assert "Warning" not in out
 
     def test_the_save_note_goes_to_stderr_in_json_mode(
         self, branch: Path, capsys: pytest.CaptureFixture[str]
@@ -460,3 +471,151 @@ class TestBaseline:
         captured = capsys.readouterr()
         json.loads(captured.out)  # stdout stays parseable
         assert "Baseline saved" in captured.err
+
+
+def flat(text: str) -> str:
+    """Rendered text with its line wrapping collapsed, for asserting sentences."""
+    return " ".join(text.split())
+
+
+def diverge(repo: Path) -> None:
+    """Save a baseline on a side branch, then go back and grow a different one.
+
+    The result is the failure this check exists for: a baseline that is real,
+    readable, and taken against the same ref, but recorded at a commit this
+    run's HEAD does not descend from.
+    """
+    git(repo, "checkout", "-q", "-b", "sidequest")
+    write_tree(repo, {"pkg/core.py": "def run(n):\n    return n + 99\n"})
+    commit_all(repo, "side change")
+    assert main(["base", "--save-baseline", "--repo", str(repo)]) == 0
+    git(repo, "checkout", "-q", "-")
+    grow(repo)
+
+
+class TestBaselineProvenance:
+    def test_a_baseline_from_divergent_history_warns_and_labels_the_verdict(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        diverge(branch)
+        capsys.readouterr()
+        code = main(["base", "--fail-on", "affected>baseline+50", "--repo", str(branch)])
+        out = flat(capsys.readouterr().out)
+        # The gate itself passes, which is exactly why the warning matters:
+        # without it this reads as a clean branch.
+        assert code == 0
+        assert "Gate: passed (baseline is not from this history)" in out
+        assert "which is not an ancestor of this run's HEAD" in out
+        assert "--require-baseline-ancestor" in out
+
+    def test_the_strict_flag_refuses_instead(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        diverge(branch)
+        capsys.readouterr()
+        code = main(
+            [
+                "base",
+                "--fail-on",
+                "affected>baseline",
+                "--require-baseline-ancestor",
+                "--repo",
+                str(branch),
+            ]
+        )
+        err = flat(capsys.readouterr().err)
+        assert code == 2
+        assert "not an ancestor of this run's HEAD" in err
+        assert "--require-baseline-ancestor was passed" in err
+        assert "Re-save the baseline at .changelens-baseline.json" in err
+
+    def test_a_commit_that_is_not_in_the_repository_is_a_different_message(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # A shallow clone, a force-push, or a rebase, not a sibling branch.
+        assert main(["base", "--save-baseline", "--repo", str(branch)]) == 0
+        path = branch / ".changelens-baseline.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["head"] = "0" * 40
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        capsys.readouterr()
+        assert main(["base", "--fail-on", "affected>baseline", "--repo", str(branch)]) == 0
+        out = flat(capsys.readouterr().out)
+        assert "Gate: passed (baseline provenance unverified)" in out
+        assert "which is not in this repository at all" in out
+        assert "not an ancestor" not in out
+
+    def test_a_baseline_with_no_recorded_commit_still_says_so(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["base", "--save-baseline", "--repo", str(branch)]) == 0
+        path = branch / ".changelens-baseline.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["head"] = None
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        capsys.readouterr()
+        assert main(["base", "--fail-on", "affected>baseline", "--repo", str(branch)]) == 0
+        assert "the baseline records no commit" in flat(capsys.readouterr().out)
+
+    def test_the_strict_flag_is_quiet_when_the_baseline_checks_out(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["base", "--save-baseline", "--repo", str(branch)]) == 0
+        capsys.readouterr()
+        grow(branch)
+        code = main(
+            [
+                "base",
+                "--fail-on",
+                "affected>baseline+5",
+                "--require-baseline-ancestor",
+                "--repo",
+                str(branch),
+            ]
+        )
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "Gate: passed\n" in out
+        assert "Warning" not in out
+
+    def test_the_strict_flag_without_a_baseline_condition_is_a_usage_error(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Otherwise it reads in a pipeline as a guarantee nobody is making.
+        code = main(
+            [
+                "base",
+                "--fail-on",
+                "affected>1",
+                "--require-baseline-ancestor",
+                "--repo",
+                str(branch),
+            ]
+        )
+        assert code == 2
+        assert "no condition here compares against one" in capsys.readouterr().err
+
+    def test_json_carries_the_provenance(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        diverge(branch)
+        capsys.readouterr()
+        code = main(["base", "--json", "--fail-on", "affected>baseline", "--repo", str(branch)])
+        payload = json.loads(capsys.readouterr().out)
+        assert code in (0, 1)
+        provenance = payload["gate"]["baseline"]["provenance"]
+        assert provenance["status"] == "not_ancestor"
+        assert provenance["verified"] is False
+        assert provenance["head"] == git(branch, "rev-parse", "HEAD").strip()
+
+    def test_the_warning_reaches_stderr_in_json_mode(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # stdout stays machine-readable, so a human-facing warning that only
+        # went there would be invisible in a piped pipeline.
+        diverge(branch)
+        capsys.readouterr()
+        main(["base", "--json", "--fail-on", "affected>baseline", "--repo", str(branch)])
+        captured = capsys.readouterr()
+        json.loads(captured.out)
+        assert "not an ancestor of this run's HEAD" in flat(captured.err)

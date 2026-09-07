@@ -6,10 +6,16 @@ from pathlib import Path
 import pytest
 
 from changelens.baseline import (
+    NO_HEAD,
+    NOT_ANCESTOR,
+    NOT_RECORDED,
     SCHEMA_VERSION,
+    UNKNOWN_COMMIT,
+    VERIFIED,
     Baseline,
     BaselineError,
     BaselineMissing,
+    Provenance,
     Spec,
     comparable,
     from_dict,
@@ -124,6 +130,40 @@ class TestLoading:
         baseline = from_dict(payload, "somewhere.json")
         assert (baseline.head, baseline.created, baseline.version) == (None, None, None)
         assert baseline.metrics["affected"] == 4
+
+
+class TestProvenanceData:
+    def test_only_an_ancestor_is_verified(self) -> None:
+        assert Provenance(VERIFIED, "a" * 40, "b" * 40).ok
+        for status in (NOT_ANCESTOR, UNKNOWN_COMMIT, NOT_RECORDED, NO_HEAD):
+            assert not Provenance(status, "a" * 40, "b" * 40).ok
+
+    def test_a_verified_baseline_needs_no_label(self) -> None:
+        assert Provenance(VERIFIED, "a" * 40, "b" * 40).label is None
+
+    def test_divergent_history_is_labeled_apart_from_unknown_provenance(self) -> None:
+        # The two are different findings: one is a commit we located and
+        # ruled out, the other is a commit we could not locate at all.
+        assert Provenance(NOT_ANCESTOR).label == "baseline is not from this history"
+        assert Provenance(UNKNOWN_COMMIT).label == "baseline provenance unverified"
+        assert Provenance(NOT_RECORDED).label == "baseline provenance unverified"
+
+    def test_each_status_describes_itself_differently(self) -> None:
+        described = {
+            Provenance(status, "a" * 40, "b" * 40).describe()
+            for status in (NOT_ANCESTOR, UNKNOWN_COMMIT, NOT_RECORDED, NO_HEAD)
+        }
+        assert len(described) == 4
+
+    def test_a_description_shortens_the_shas(self) -> None:
+        text = Provenance(NOT_ANCESTOR, "a" * 40, "b" * 40).describe()
+        assert "commit aaaaaaa," in text
+        assert "(bbbbbbb)" in text
+        assert "a" * 40 not in text
+
+    def test_a_missing_commit_is_not_described_as_divergent_history(self) -> None:
+        assert "shallow clone" in Provenance(UNKNOWN_COMMIT, "a" * 40, "b" * 40).describe()
+        assert "not an ancestor" not in Provenance(UNKNOWN_COMMIT, "a" * 40, "b" * 40).describe()
 
 
 class TestComparability:
