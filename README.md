@@ -27,8 +27,10 @@ changelens HEAD~1
 
 This is the first part of the real output of `./demo.sh`, which commits a
 change to `refund_payment` in the bundled example project and runs
-changelens on it (the rest is under [CI gating](#ci-gating) and [Gating on
-growth](#gating-on-growth)):
+changelens on it. The rest of the demo runs under [CI
+gating](#ci-gating), [Running only the tests that
+matter](#running-only-the-tests-that-matter), and [Gating on
+growth](#gating-on-growth):
 
 ```
 $ changelens HEAD~1
@@ -355,7 +357,7 @@ branch, or one written before the history was rewritten. Its numbers land in
 the report looking exactly like a real measurement.
 
 So changelens checks the commit the baseline recorded against this run's
-history, with `git merge-base --is-ancestor`. This is the fifth part of
+history, with `git merge-base --is-ancestor`. This is the last part of
 `./demo.sh`. A baseline is saved on a side branch, and the branch that gates
 against it affects the same 9 files, so the gate reads perfectly flat:
 
