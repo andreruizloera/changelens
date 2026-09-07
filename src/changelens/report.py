@@ -13,7 +13,10 @@ from changelens.impact import HIGH, Dependent, Report
 # 3 added the "baseline" object and, on a condition that compares against a
 # baseline, its "baseline", "delta", and "entered" keys. A condition that
 # compares against a constant is byte-for-byte what version 2 emitted.
-JSON_SCHEMA_VERSION = 3
+# 4 added "threshold" on a condition whose offset is a percentage, the count
+# that percentage worked out to. Conditions written without a percentage are
+# byte-for-byte what version 3 emitted.
+JSON_SCHEMA_VERSION = 4
 
 # How a metric's new files should be described, per metric.
 _ENTERED_PHRASE = {
@@ -98,6 +101,10 @@ def render_gate(gate: GateResult) -> str:
         actual = f"actual: {metric} = {result.actual_text}"
         if result.baseline_text is not None:
             actual += f", baseline {result.baseline_text}, {_delta_text(result)}"
+        if result.threshold_text is not None:
+            # A percentage is written in one unit and decided in another, so
+            # the count it worked out to is the number the reader needs.
+            actual += f", threshold {result.threshold_text}"
         lines.append(f"  {mark}  {expression}  ({actual})")
         # Which files moved is the answer a reviewer actually needs, and it
         # is only worth the space when the condition tripped upward.
@@ -176,6 +183,8 @@ def _condition_dict(result: ConditionResult) -> dict[str, object]:
         payload["baseline"] = result.baseline_text if is_confidence else result.baseline
         payload["delta"] = _delta_text(result) if is_confidence else result.delta
         payload["entered"] = list(result.entered)
+    if result.threshold_text is not None:
+        payload["threshold"] = result.threshold_text
     return payload
 
 

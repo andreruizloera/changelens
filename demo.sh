@@ -86,9 +86,45 @@ if [ "$STATUS" -ne 1 ]; then
     exit 1
 fi
 
-# Everything the README pastes for these two steps, checked against what the
-# tool just printed. If a line here drifts, CI goes red instead of the docs
-# quietly going stale.
+# The same growth against a percentage of the baseline instead of a file count.
+# The baseline is 6 and this run is 9, so +25% (a threshold of 7.5) trips and
+# +50% (a threshold of exactly 9) does not: a run sitting exactly on the line
+# is not over it.
+echo
+echo "\$ changelens base --fail-on \"affected>baseline+25%\""
+echo
+set +e
+PCT_OVER="$("${RUN[@]}" base --fail-on "affected>baseline+25%")"
+OVER_STATUS=$?
+PCT_AT="$("${RUN[@]}" base --fail-on "affected>baseline+50%")"
+AT_STATUS=$?
+set -e
+echo "..."
+echo "$PCT_OVER" | tail -n 6
+echo
+echo "\$ echo \$?"
+echo "$OVER_STATUS"
+echo
+echo "\$ changelens base --fail-on \"affected>baseline+50%\""
+echo
+echo "..."
+echo "$PCT_AT" | tail -n 2
+echo
+echo "\$ echo \$?"
+echo "$AT_STATUS"
+
+if [ "$OVER_STATUS" -ne 1 ]; then
+    echo "demo: expected affected>baseline+25% to fail with exit 1, got $OVER_STATUS" >&2
+    exit 1
+fi
+if [ "$AT_STATUS" -ne 0 ]; then
+    echo "demo: expected affected>baseline+50% to pass with exit 0, got $AT_STATUS" >&2
+    exit 1
+fi
+
+# Everything the README pastes for these steps, checked against what the tool
+# just printed. If a line here drifts, CI goes red instead of the docs quietly
+# going stale.
 EXPECTED=(
     "Baseline saved to .changelens-baseline.json (ref base: affected = 6, confidence High)"
     "FAIL  affected>baseline  (actual: affected = 9, baseline 6, +3)"
@@ -96,9 +132,13 @@ EXPECTED=(
     "billing/statements.py"
     "reports/monthly.py"
     "tests/test_statements.py"
+    "FAIL  affected>baseline+25%  (actual: affected = 9, baseline 6, +3, threshold 7.5)"
+    "ok    affected>baseline+50%  (actual: affected = 9, baseline 6, +3, threshold 9)"
 )
 BOTH="$SAVED
-$GROWN"
+$GROWN
+$PCT_OVER
+$PCT_AT"
 for line in "${EXPECTED[@]}"; do
     # A here-string, not a pipe: `set -o pipefail` would otherwise turn the
     # SIGPIPE from a matching `grep -q` into a failure.

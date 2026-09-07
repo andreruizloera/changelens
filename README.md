@@ -98,6 +98,7 @@ changelens HEAD~1 --repo ~/src/myproject   # run against another repo
 changelens main --fail-on "affected>20"    # exit 1 if the radius is wide
 changelens main --save-baseline            # record this radius for later
 changelens main --fail-on "affected>baseline+10"   # exit 1 if it widened
+changelens main --fail-on "affected>baseline+25%"  # or widened by a quarter
 ```
 
 The mermaid output pastes directly into GitHub comments, GitLab, and
@@ -143,7 +144,7 @@ Metrics:
 
 Operators are `>`, `>=`, `<`, `<=`, `=` (or `==`), and `!=`. The right side
 is a number, a confidence level, or a comparison against a saved baseline
-(`baseline`, `baseline+10`, `baseline-3`); see [Gating on
+(`baseline`, `baseline+10`, `baseline-3`, `baseline+25%`); see [Gating on
 growth](#gating-on-growth). Quote the expression, or your shell will read
 `>` as a redirect; changelens says so by name if you forget.
 
@@ -194,8 +195,10 @@ gating on is whether this branch made the radius wider.
 
 `--save-baseline` writes the current run's numbers to
 `.changelens-baseline.json`, and a condition can compare against it with
-`baseline`, optionally offset: `affected>baseline+10` means "fail when this
-run is more than 10 files wider than the baseline".
+`baseline`, optionally offset by a file count or a percentage:
+`affected>baseline+10` means "fail when this run is more than 10 files wider
+than the baseline", and `affected>baseline+25%` means "fail when it is more
+than a quarter wider".
 
 This is the third part of `./demo.sh`. It saves the radius of the refund
 change, then commits a second change that reaches a formatting helper the
@@ -224,8 +227,67 @@ $ echo $?
 Naming the files that entered is the point of storing more than a count: a
 reviewer's next question after "+3" is always "which three".
 
-Four behaviors here are judgement calls, so they are stated rather than
-left to be discovered:
+### Percentage thresholds
+
+A file count is the wrong unit at both ends of the repository size range:
+ten files is noise in a four-thousand-file repository and a rewrite in a
+forty-file one. So the offset can be a percentage instead, and **the
+percentage is of the baseline's own value for that metric, not of the
+repository total**: against a baseline of 6 affected files,
+`affected>baseline+25%` is a threshold of 7.5 files.
+
+This is the fourth part of `./demo.sh`, run against the same grown branch as
+above, which affects 9 files against a baseline of 6:
+
+```
+$ changelens base --fail-on "affected>baseline+25%"
+
+...
+Gate: failed
+  FAIL  affected>baseline+25%  (actual: affected = 9, baseline 6, +3, threshold 7.5)
+        3 files entered the radius since the baseline:
+          billing/statements.py
+          reports/monthly.py
+          tests/test_statements.py
+
+$ echo $?
+1
+
+$ changelens base --fail-on "affected>baseline+50%"
+
+...
+Gate: passed
+  ok    affected>baseline+50%  (actual: affected = 9, baseline 6, +3, threshold 9)
+
+$ echo $?
+0
+```
+
+Those two runs are the boundary: 50% of 6 is exactly 9, and a run sitting
+exactly on the threshold does not trip `>`. One file more would.
+
+The threshold is never rounded. Both sides of the comparison are multiplied
+by 100 and compared as integers, so `affected>baseline+25%` against a
+baseline of 6 asks whether `900 > 750`, and there is no rounding rule to
+remember or to disagree with. The count the percentage worked out to is
+printed on the line, exactly, so a gate written in one unit still reports in
+the metric's own.
+
+Percentages take the same shapes the file-count offsets do:
+`affected>baseline+25%` fails on growth past a quarter,
+`affected<baseline-25%` fails on a shrink past a quarter, and every numeric
+metric accepts one. Offsets are whole numbers; `baseline+2.5%` is a usage
+error rather than a silent reinterpretation.
+
+**A percentage of a zero baseline is zero.** If the baseline recorded no
+affected files, no percentage is room to grow, so any growth trips and a
+still-empty radius does not. Nothing divides by the baseline, so this is
+arithmetic rather than an error.
+
+### Judgement calls
+
+Four more behaviors here are judgement calls, so they are stated rather
+than left to be discovered:
 
 - **A missing baseline is an error, not a pass.** `--fail-on
   "affected>baseline"` with no baseline file exits 2 and prints the command

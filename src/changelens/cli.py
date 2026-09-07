@@ -46,6 +46,8 @@ _FAIL_ON_HELP = "\n".join(
         '"confidence>=medium" (trips on Medium or Low).',
         "Compare against a saved baseline instead of a constant:",
         '"affected>baseline+10" (10 files wider than the baseline),',
+        # argparse %-expands help text, so a literal percent sign is doubled.
+        '"affected>baseline+25%%" (a quarter wider than the baseline),',
         '"confidence>baseline" (less trustworthy than the baseline).',
     ]
 )

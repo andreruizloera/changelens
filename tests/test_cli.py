@@ -392,7 +392,7 @@ class TestBaseline:
         captured = capsys.readouterr()
         assert code == 1
         payload = json.loads(captured.out)
-        assert payload["schema_version"] == 3
+        assert payload["schema_version"] == 4
         assert payload["gate"]["baseline"]["spec"] == {"ref": "base", "staged": False}
         assert payload["gate"]["baseline"]["metrics"]["affected"] == 2
         condition = payload["gate"]["conditions"][0]
@@ -406,6 +406,52 @@ class TestBaseline:
         assert main(["base", "--json", "--fail-on", "affected>1", "--repo", str(branch)]) == 1
         condition = json.loads(capsys.readouterr().out)["gate"]["conditions"][0]
         assert set(condition) == {"expression", "metric", "operator", "value", "actual", "tripped"}
+
+    def test_a_percentage_threshold_trips_end_to_end(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Baseline of 2 affected files; +25% of 2 is 0.5, so a threshold of
+        # 2.5, and the grown branch's 4 files clear it.
+        assert main(["base", "--save-baseline", "--repo", str(branch)]) == 0
+        capsys.readouterr()
+        grow(branch)
+        code = main(["base", "--fail-on", "affected>baseline+25%", "--repo", str(branch)])
+        out = capsys.readouterr().out
+        assert code == 1
+        assert "FAIL  affected>baseline+25%" in out
+        assert "(actual: affected = 4, baseline 2, +2, threshold 2.5)" in out
+
+    def test_a_percentage_threshold_wide_enough_to_absorb_the_growth_passes(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["base", "--save-baseline", "--repo", str(branch)]) == 0
+        grow(branch)
+        code = main(["base", "--fail-on", "affected>baseline+100%", "--repo", str(branch)])
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "Gate: passed" in out
+        assert "ok    affected>baseline+100%" in out
+        assert "threshold 4)" in out
+
+    def test_a_bad_percentage_is_a_usage_error_before_git_runs(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["HEAD~1", "--fail-on", "affected>baseline+2.5%"]) == 2
+        assert "cannot read the baseline offset" in capsys.readouterr().err
+
+    def test_json_carries_the_threshold_a_percentage_worked_out_to(
+        self, branch: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["base", "--save-baseline", "--repo", str(branch)]) == 0
+        capsys.readouterr()
+        grow(branch)
+        code = main(["base", "--json", "--fail-on", "affected>baseline+25%", "--repo", str(branch)])
+        assert code == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["schema_version"] == 4
+        condition = payload["gate"]["conditions"][0]
+        assert condition["value"] == "baseline+25%"
+        assert condition["threshold"] == "2.5"
 
     def test_the_save_note_goes_to_stderr_in_json_mode(
         self, branch: Path, capsys: pytest.CaptureFixture[str]

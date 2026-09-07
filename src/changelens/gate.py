@@ -9,7 +9,12 @@ A condition can compare against a saved baseline instead of a fixed number:
 files wider than the baseline", which is the condition an established
 repository can actually keep switched on. See baseline.py.
 
-Four rules here are judgement calls and are documented rather than hidden:
+The offset can also be a percentage, `--fail-on "affected>baseline+25%"`,
+because a fixed file count is the wrong unit at both ends of the repository
+size range: ten files is noise in a four-thousand-file repository and a
+rewrite in a forty-file one.
+
+Five rules here are judgement calls and are documented rather than hidden:
 
 - Confidence compares by RISK, so high < medium < low. `confidence>=medium`
   trips on a Medium or a Low report; `confidence=low` trips only on Low.
@@ -21,6 +26,10 @@ Four rules here are judgement calls and are documented rather than hidden:
   stamp.
 - `confidence>baseline` is allowed but `confidence>baseline+1` is not: a
   step on a three-level risk scale is not a quantity worth writing gates in.
+- A percentage is a percentage OF THE BASELINE VALUE, not of the repository,
+  and it is evaluated in exact integer arithmetic (both sides scaled by 100)
+  so no rounding rule has to be invented or remembered. A run sitting exactly
+  on the threshold does not trip `>`.
 
 This module is pure: it reads a Report and returns data. Rendering lives in
 report.py.
@@ -71,7 +80,11 @@ _OPS: dict[str, Callable[[int, int], bool]] = {
 
 _EXPRESSION = re.compile(r"^\s*([A-Za-z_]+)\s*(>=|<=|==|!=|=|>|<)\s*(.+?)\s*$")
 _BARE_NAME = re.compile(r"^\s*([A-Za-z_]+)\s*$")
-_BASELINE_VALUE = re.compile(r"^baseline\s*(?:([+-])\s*(\d+))?$", re.IGNORECASE)
+_BASELINE_VALUE = re.compile(r"^baseline\s*(?:([+-])\s*(\d+)\s*(%?))?$", re.IGNORECASE)
+
+# Both sides of a percentage comparison are multiplied by this, which keeps the
+# arithmetic in integers: no float, no rounding rule, no drift at the boundary.
+PERCENT_SCALE = 100
 
 
 class GateError(ValueError):
@@ -86,6 +99,7 @@ class Condition:
     value: int  # absolute target; the offset from the baseline when relative
     value_text: str  # what the value should look like when printed back
     relative: bool = False  # compare against a saved baseline, not a constant
+    percent: bool = False  # the offset is percent OF THE BASELINE, not a count
 
 
 @dataclass(frozen=True)
@@ -97,6 +111,7 @@ class ConditionResult:
     baseline: int | None = None  # the baseline's value, for a relative condition
     baseline_text: str | None = None
     entered: tuple[str, ...] = ()  # files this metric gained since the baseline
+    threshold_text: str | None = None  # the count a percentage worked out to
 
     @property
     def delta(self) -> int | None:
@@ -174,7 +189,8 @@ def parse_condition(expression: str) -> Condition:
 
     relative = _BASELINE_VALUE.match(raw)
     if relative is not None:
-        sign, digits = relative.group(1), relative.group(2)
+        sign, digits, mark = relative.group(1), relative.group(2), relative.group(3)
+        percent = mark == "%"
         if metric == CONFIDENCE:
             if digits is not None:
                 raise GateError(
@@ -184,8 +200,22 @@ def parse_condition(expression: str) -> Condition:
                 )
             return Condition(expression, metric, op, 0, "baseline", relative=True)
         offset = 0 if digits is None else int(digits) * (-1 if sign == "-" else 1)
-        text = "baseline" if digits is None else f"baseline{sign}{digits}"
-        return Condition(expression, metric, op, offset, text, relative=True)
+        if percent and offset < -PERCENT_SCALE:
+            raise GateError(
+                f"a baseline cannot shrink by more than 100%, so {raw!r} in --fail-on "
+                f"{expression!r} describes a threshold below zero"
+            )
+        text = "baseline" if digits is None else f"baseline{sign}{digits}{mark}"
+        return Condition(expression, metric, op, offset, text, relative=True, percent=percent)
+
+    if raw.lower().startswith("baseline"):
+        # Close enough to the baseline form that the generic "whole number"
+        # message would send the reader looking in the wrong place.
+        raise GateError(
+            f"cannot read the baseline offset {raw!r} in --fail-on {expression!r}; write it "
+            'as "baseline", "baseline+10" (ten more files), or "baseline+25%" (a quarter '
+            "wider than the baseline). Offsets are whole numbers."
+        )
 
     if metric == CONFIDENCE:
         level = _LEVEL_BY_WORD.get(raw.lower())
@@ -306,6 +336,28 @@ def _baseline_value(baseline: Baseline, condition: Condition) -> tuple[int, str]
     return value, str(value)
 
 
+def percent_threshold(baseline_value: int, offset: int) -> int:
+    """The right-hand side of a percentage comparison, scaled by PERCENT_SCALE.
+
+    Scaling instead of dividing keeps this exact: `affected>baseline+25%`
+    against a baseline of 6 compares 100*actual against 750, so 7 passes and 8
+    trips, and no rounding rule has to be chosen. A baseline of 0 gives a
+    threshold of 0, which is the honest answer: no percentage of nothing is
+    room to grow, so any growth from an empty radius trips. Nothing here
+    divides by the baseline, so a zero baseline is arithmetic, not an error.
+    """
+    return baseline_value * (PERCENT_SCALE + offset)
+
+
+def format_scaled(scaled: int) -> str:
+    """A PERCENT_SCALE-scaled threshold as an exact decimal, for reporting."""
+    sign = "-" if scaled < 0 else ""
+    whole, fraction = divmod(abs(scaled), PERCENT_SCALE)
+    if fraction == 0:
+        return f"{sign}{whole}"
+    return f"{sign}{whole}.{fraction:02d}".rstrip("0")
+
+
 def check_against(conditions: Iterable[Condition], baseline: Baseline) -> None:
     """Raise GateError if the baseline cannot answer these conditions.
 
@@ -337,7 +389,11 @@ def evaluate(
 
         base_value: int | None = None
         base_text: str | None = None
+        threshold_text: str | None = None
         entered: tuple[str, ...] = ()
+        # A percentage comparison runs with both sides multiplied by
+        # PERCENT_SCALE, so the same integer operators decide both forms.
+        scale = 1
         target = condition.value
         if condition.relative:
             if baseline is None:
@@ -346,13 +402,18 @@ def evaluate(
                     "and none was loaded"
                 )
             base_value, base_text = _baseline_value(baseline, condition)
-            target = base_value + condition.value
+            if condition.percent:
+                scale = PERCENT_SCALE
+                target = percent_threshold(base_value, condition.value)
+                threshold_text = format_scaled(target)
+            else:
+                target = base_value + condition.value
             now = files_for(sets, condition.metric)
             before = files_for(baseline.files, condition.metric)
             if now is not None and before is not None:
                 entered = tuple(f for f in now if f not in set(before))
 
-        tripped = False if skipped else _OPS[condition.op](actual, target)
+        tripped = False if skipped else _OPS[condition.op](actual * scale, target)
         results.append(
             ConditionResult(
                 condition=condition,
@@ -362,6 +423,7 @@ def evaluate(
                 baseline=base_value,
                 baseline_text=base_text,
                 entered=entered,
+                threshold_text=threshold_text,
             )
         )
     return GateResult(

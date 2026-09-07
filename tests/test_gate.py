@@ -263,6 +263,149 @@ class TestBaselineParsing:
         assert needs_baseline(parse_conditions(["affected>20", "tests<baseline"]))
 
 
+class TestPercentParsing:
+    @pytest.mark.parametrize(
+        ("expression", "offset", "text"),
+        [
+            ("affected>baseline+25%", 25, "baseline+25%"),
+            ("affected<baseline-25%", -25, "baseline-25%"),
+            ("affected > baseline + 25 %", 25, "baseline+25%"),
+            ("affected>baseline+0%", 0, "baseline+0%"),
+            ("affected>baseline+250%", 250, "baseline+250%"),
+        ],
+    )
+    def test_percent_forms(self, expression: str, offset: int, text: str) -> None:
+        condition = parse_condition(expression)
+        assert (condition.relative, condition.percent) == (True, True)
+        assert (condition.value, condition.value_text) == (offset, text)
+
+    def test_a_plain_offset_is_not_a_percentage(self) -> None:
+        assert not parse_condition("affected>baseline+25").percent
+
+    def test_a_bare_baseline_is_not_a_percentage(self) -> None:
+        assert not parse_condition("affected>baseline").percent
+
+    def test_shrinking_by_more_than_everything_is_rejected(self) -> None:
+        with pytest.raises(GateError, match="cannot shrink by more than 100%"):
+            parse_condition("affected<baseline-101%")
+
+    def test_a_fractional_percent_says_offsets_are_whole_numbers(self) -> None:
+        with pytest.raises(GateError) as exc:
+            parse_condition("affected>baseline+2.5%")
+        assert "cannot read the baseline offset" in str(exc.value)
+        assert "whole numbers" in str(exc.value)
+
+    def test_confidence_still_refuses_a_percentage(self) -> None:
+        with pytest.raises(GateError, match="not an offset"):
+            parse_condition("confidence>baseline+10%")
+
+
+class TestPercentEvaluation:
+    def test_the_percentage_is_of_the_baseline_value(self) -> None:
+        # The same report and the same condition, two baselines: the threshold
+        # scales with the baseline, so it is a percentage of that and not of
+        # anything about the repository as a whole.
+        conditions = parse_conditions(["affected>baseline+25%"])
+        report = build_report(direct=11)
+        assert evaluate(report, conditions, baseline_of(direct=8)).results[0].threshold_text == "10"
+        assert evaluate(report, conditions, baseline_of(direct=4)).results[0].threshold_text == "5"
+
+    def test_exactly_at_an_whole_threshold_does_not_trip_and_one_over_does(self) -> None:
+        conditions = parse_conditions(["affected>baseline+25%"])
+        baseline = baseline_of(direct=8)  # threshold is exactly 10
+        assert not evaluate(build_report(direct=9), conditions, baseline).failed
+        assert not evaluate(build_report(direct=10), conditions, baseline).failed
+        assert evaluate(build_report(direct=11), conditions, baseline).failed
+
+    def test_a_fractional_threshold_is_not_rounded_away(self) -> None:
+        # 25% of 6 is 1.5, so 7 is under the line and 8 is over it. Rounding
+        # either way would move the boundary by a whole file.
+        conditions = parse_conditions(["affected>baseline+25%"])
+        baseline = baseline_of(direct=6)
+        assert not evaluate(build_report(direct=7), conditions, baseline).failed
+        assert evaluate(build_report(direct=8), conditions, baseline).failed
+
+    def test_at_or_over_uses_the_same_boundary(self) -> None:
+        conditions = parse_conditions(["affected>=baseline+25%"])
+        baseline = baseline_of(direct=8)
+        assert not evaluate(build_report(direct=9), conditions, baseline).failed
+        assert evaluate(build_report(direct=10), conditions, baseline).failed
+
+    def test_a_zero_baseline_does_not_divide_by_zero(self) -> None:
+        # No percentage of nothing is room to grow, so any growth from an
+        # empty radius trips, and a still-empty radius does not.
+        conditions = parse_conditions(["affected>baseline+50%"])
+        empty = baseline_of()
+        assert empty.metrics["affected"] == 0
+        assert not evaluate(build_report(), conditions, empty).failed
+        assert evaluate(build_report(direct=1), conditions, empty).failed
+
+    def test_a_negative_percentage_gates_on_shrinking(self) -> None:
+        # "fail if this branch dropped more than a quarter of the radius"
+        conditions = parse_conditions(["affected<baseline-25%"])
+        baseline = baseline_of(direct=8)  # threshold is exactly 6
+        assert not evaluate(build_report(direct=6), conditions, baseline).failed
+        assert evaluate(build_report(direct=5), conditions, baseline).failed
+
+    def test_a_zero_percent_offset_is_the_baseline_itself(self) -> None:
+        conditions = parse_conditions(["affected>baseline+0%"])
+        baseline = baseline_of(direct=4)
+        assert not evaluate(build_report(direct=4), conditions, baseline).failed
+        assert evaluate(build_report(direct=5), conditions, baseline).failed
+
+    def test_entrants_are_still_named(self) -> None:
+        gate = evaluate(
+            build_report(direct=3),
+            parse_conditions(["affected>baseline+25%"]),
+            baseline_of(direct=1),
+        )
+        assert gate.results[0].entered == ("app1.py", "app2.py")
+
+    def test_a_missing_metric_is_still_an_error(self) -> None:
+        older = Baseline(metrics={"affected": 1}, confidence=HIGH, spec=Spec(ref="main"))
+        with pytest.raises(GateError, match="no 'tests' metric"):
+            evaluate(build_report(tests=2), parse_conditions(["tests>baseline+25%"]), older)
+
+
+class TestPercentRendering:
+    def test_the_line_shows_the_count_the_percentage_worked_out_to(self) -> None:
+        gate = evaluate(
+            build_report(direct=9),
+            parse_conditions(["affected>baseline+25%"]),
+            baseline_of(direct=6),
+        )
+        assert (
+            "FAIL  affected>baseline+25%  (actual: affected = 9, baseline 6, +3, threshold 7.5)"
+            in render_gate(gate)
+        )
+
+    def test_a_whole_threshold_is_printed_without_decimals(self) -> None:
+        gate = evaluate(
+            build_report(direct=11),
+            parse_conditions(["affected>baseline+25%"]),
+            baseline_of(direct=8),
+        )
+        assert "threshold 10)" in render_gate(gate)
+
+    @pytest.mark.parametrize(
+        ("baseline_files", "offset", "expected"),
+        [(6, 25, "7.5"), (8, 25, "10"), (3, 35, "4.05"), (0, 50, "0"), (7, 0, "7")],
+    )
+    def test_thresholds_are_exact(self, baseline_files: int, offset: int, expected: str) -> None:
+        gate = evaluate(
+            build_report(direct=99),
+            parse_conditions([f"affected>baseline+{offset}%"]),
+            baseline_of(direct=baseline_files),
+        )
+        assert gate.results[0].threshold_text == expected
+
+    def test_a_plain_offset_prints_no_threshold(self) -> None:
+        gate = evaluate(
+            build_report(direct=9), parse_conditions(["affected>baseline+2"]), baseline_of(direct=6)
+        )
+        assert "threshold" not in render_gate(gate)
+
+
 class TestFileSets:
     def test_affected_is_the_union_of_the_three_buckets(self) -> None:
         sets = file_sets_of(build_report(direct=2, transitive=1, tests=1))
