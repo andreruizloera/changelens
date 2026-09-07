@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from changelens.impact import HIGH, MEDIUM, ChangedSymbol, Dependent, Report
-from changelens.report import render_json, render_mermaid, render_terminal
+from changelens.report import render_json, render_mermaid, render_terminal, render_tests_only
 
 
 def sample_report() -> Report:
@@ -143,3 +143,14 @@ def test_mermaid_output() -> None:
     assert any(ln.strip() == "p_billing_invoices_py --> d_api_refunds_py" for ln in lines)
     assert any("-.->" in ln for ln in lines)
     assert "classDef changed" in out
+
+
+def test_tests_only_is_paths_one_per_line() -> None:
+    out = render_tests_only(sample_report())
+    assert out.splitlines() == ["tests/test_refunds.py"]
+    assert ":" not in out  # no annotations, no headers, nothing to strip
+
+
+def test_tests_only_is_empty_when_nothing_downstream_is_a_test() -> None:
+    # Empty, not "(none found)": the caller pipes this into a test runner.
+    assert render_tests_only(Report()) == ""

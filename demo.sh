@@ -122,6 +122,32 @@ if [ "$AT_STATUS" -ne 0 ]; then
     exit 1
 fi
 
+# The same radius, narrowed to what a test runner can take as arguments.
+echo
+echo "\$ changelens base --tests-only"
+echo
+set +e
+TESTS_ONLY="$("${RUN[@]}" base --tests-only)"
+TESTS_STATUS=$?
+set -e
+echo "$TESTS_ONLY"
+echo
+echo "\$ echo \$?"
+echo "$TESTS_STATUS"
+
+if [ "$TESTS_STATUS" -ne 0 ]; then
+    echo "demo: expected --tests-only to exit 0, got $TESTS_STATUS" >&2
+    exit 1
+fi
+# Every line must be a path a runner can actually open, which is the whole
+# contract of this flag.
+while IFS= read -r path; do
+    if [ ! -f "$path" ]; then
+        echo "demo: --tests-only printed something that is not a file: $path" >&2
+        exit 1
+    fi
+done <<<"$TESTS_ONLY"
+
 # A baseline from somewhere this branch does not descend from: the same ref,
 # the same repository, the same numbers, and a comparison that means nothing.
 # This is what a cached CI artifact from another branch looks like.
@@ -186,6 +212,9 @@ EXPECTED=(
     "tests/test_statements.py"
     "FAIL  affected>baseline+25%  (actual: affected = 9, baseline 6, +3, threshold 7.5)"
     "ok    affected>baseline+50%  (actual: affected = 9, baseline 6, +3, threshold 9)"
+    "tests/test_refunds.py"
+    "tests/test_statements.py"
+    "tests/test_webhooks.py"
     "Gate: passed (baseline is not from this history)"
     "  ok    affected>baseline  (actual: affected = 9, baseline 9, no change)"
     # The two lines carrying commit shas differ every run, so the wrapped
@@ -199,6 +228,7 @@ BOTH="$SAVED
 $GROWN
 $PCT_OVER
 $PCT_AT
+$TESTS_ONLY
 $UNRELATED"
 for line in "${EXPECTED[@]}"; do
     # A here-string, not a pipe: `set -o pipefail` would otherwise turn the

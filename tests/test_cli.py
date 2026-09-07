@@ -87,6 +87,70 @@ def test_empty_range_still_emits_json(project: Path, capsys: pytest.CaptureFixtu
     assert payload["metrics"]["affected"] == 0
 
 
+class TestTestsOnly:
+    def test_stdout_is_the_test_paths_and_nothing_else(
+        self, project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["HEAD~1", "--tests-only", "--repo", str(project)]) == 0
+        captured = capsys.readouterr()
+        assert captured.out == "tests/test_app.py\n"
+        assert captured.err == ""
+
+    def test_it_is_pipeable_line_by_line(
+        self, project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["HEAD~1", "--tests-only", "--repo", str(project)])
+        lines = capsys.readouterr().out.splitlines()
+        assert lines == ["tests/test_app.py"]
+        assert all(Path(project / line).exists() for line in lines)
+
+    def test_no_relevant_tests_prints_nothing_to_stdout(
+        self, git_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # An empty stdout is a real answer here, so the sentence explaining it
+        # goes to stderr where a test runner will not read it as a path.
+        write_tree(git_repo, {"pkg/__init__.py": "", "pkg/core.py": "def run():\n    return 1\n"})
+        commit_all(git_repo, "baseline")
+        write_tree(git_repo, {"pkg/core.py": "def run():\n    return 2\n"})
+        commit_all(git_repo, "change")
+        assert main(["HEAD~1", "--tests-only", "--repo", str(git_repo)]) == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "No relevant tests found" in captured.err
+
+    def test_an_empty_range_says_so_on_stderr_too(
+        self, project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["HEAD", "--tests-only", "--repo", str(project)]) == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "No relevant tests found" in captured.err
+
+    def test_a_gate_keeps_stdout_clean_and_still_sets_the_exit_code(
+        self, project: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code = main(["HEAD~1", "--tests-only", "--fail-on", "tests>0", "--repo", str(project)])
+        captured = capsys.readouterr()
+        assert code == 1
+        assert captured.out == "tests/test_app.py\n"
+        assert "Gate: failed" in captured.err
+
+    @pytest.mark.parametrize("other", ["--json", "--mermaid"])
+    def test_it_conflicts_with_the_other_output_formats(
+        self, other: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["HEAD~1", other, "--tests-only"]) == 2
+        err = capsys.readouterr().err
+        assert "not several" in err
+        assert "--tests-only" in err and other in err
+
+    def test_json_and_mermaid_still_conflict_with_each_other(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["HEAD~1", "--json", "--mermaid"]) == 2
+        assert "not several" in capsys.readouterr().err
+
+
 class TestFailOn:
     def test_tripped_gate_exits_one(
         self, project: Path, capsys: pytest.CaptureFixture[str]

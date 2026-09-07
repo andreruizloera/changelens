@@ -165,6 +165,16 @@ def render_gate(gate: GateResult) -> str:
     return "\n".join(lines)
 
 
+def render_tests_only(report: Report) -> str:
+    """Just the relevant test paths, one per line, for piping into a runner.
+
+    Nothing else goes to this stream: no header, no count, no "none found".
+    A caller writing `pytest $(changelens main --tests-only)` needs stdout to
+    be either paths or empty, and empty is a real answer.
+    """
+    return "\n".join(dep.file for dep in report.relevant_tests)
+
+
 def render_json(report: Report, gate: GateResult | None = None) -> str:
     payload: dict[str, object] = {
         "schema_version": JSON_SCHEMA_VERSION,

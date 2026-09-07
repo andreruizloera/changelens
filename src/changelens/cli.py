@@ -36,7 +36,13 @@ from changelens.gitdiff import (
     repo_root,
 )
 from changelens.impact import Report, analyze
-from changelens.report import render_gate, render_json, render_mermaid, render_terminal
+from changelens.report import (
+    render_gate,
+    render_json,
+    render_mermaid,
+    render_terminal,
+    render_tests_only,
+)
 
 EXIT_OK = 0
 EXIT_GATE_FAILED = 1
@@ -75,6 +81,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--staged", action="store_true", help="analyze staged changes instead")
     parser.add_argument("--json", action="store_true", help="emit a machine-readable JSON report")
     parser.add_argument("--mermaid", action="store_true", help="emit a mermaid impact flowchart")
+    parser.add_argument(
+        "--tests-only",
+        action="store_true",
+        help=(
+            "print only the relevant test paths, one per line, for a test runner.\n"
+            "Prints nothing when nothing downstream is a test, so guard the pipe:\n"
+            '  T=$(changelens main --tests-only); [ -n "$T" ] && pytest $T'
+        ),
+    )
     parser.add_argument(
         "--repo", type=Path, default=None, help="repository path (default: current directory)"
     )
@@ -132,8 +147,11 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return EXIT_USAGE
-    if args.json and args.mermaid:
-        print("error: pass --json or --mermaid, not both", file=sys.stderr)
+    formats = [name for name, on in (("--json", args.json), ("--mermaid", args.mermaid)) if on]
+    if args.tests_only:
+        formats.append("--tests-only")
+    if len(formats) > 1:
+        print(f"error: pass one of {', '.join(formats)}, not several", file=sys.stderr)
         return EXIT_USAGE
 
     # Parsed before touching git, so a typo in a gate fails in milliseconds
@@ -260,9 +278,20 @@ def main(argv: list[str] | None = None) -> int:
             except BaselineError as exc:
                 save_error = str(exc)
 
-    machine = args.json or args.mermaid
+    machine = args.json or args.mermaid or args.tests_only
     gate_printed = False
-    if not diffs and not args.json:
+    if args.tests_only:
+        # Paths or nothing. An empty range is a sentence on stderr, because a
+        # runner reading this stream would try to collect it as a path.
+        paths = render_tests_only(report)
+        if paths:
+            print(paths)
+        else:
+            print(
+                "No relevant tests found; nothing downstream of this change is a test file.",
+                file=sys.stderr,
+            )
+    elif not diffs and not args.json:
         # --json keeps its contract even on an empty range: a CI script that
         # pipes into jq should not have to special-case a sentence.
         target = "staged changes" if args.staged else f"range {args.ref}..HEAD"

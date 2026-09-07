@@ -68,6 +68,9 @@ Useful moments:
 - pre-review: paste the report into the PR so reviewers see the radius
 - pre-merge: check that the "Relevant tests" list actually ran in CI
 - refactoring: `changelens --staged` before committing a risky edit
+- inner loop: `--tests-only` to run the tests your branch touches instead
+  of the whole suite; see [Running only the tests that
+  matter](#running-only-the-tests-that-matter)
 - CI: `changelens origin/main --fail-on "affected>20"` to stop a wide
   change from merging without a human look
 - long-lived branch: `--save-baseline` when the work starts, then
@@ -94,6 +97,7 @@ changelens abc1234         # impact since a specific commit
 changelens --staged        # impact of what is staged right now
 changelens HEAD~1 --json     # machine-readable report
 changelens HEAD~1 --mermaid  # impact graph as a mermaid flowchart
+changelens HEAD~1 --tests-only   # just the test paths, for a test runner
 changelens HEAD~1 --repo ~/src/myproject   # run against another repo
 changelens main --fail-on "affected>20"    # exit 1 if the radius is wide
 changelens main --save-baseline            # record this radius for later
@@ -108,6 +112,36 @@ mermaid.live:
 ```sh
 changelens HEAD~1 --mermaid | pbcopy
 ```
+
+### Running only the tests that matter
+
+`--tests-only` prints the "Relevant tests" list and nothing else, one path
+per line, in the same ranked order the report uses. This is the real output
+of the demo's example project, run against its `base` branch:
+
+```
+$ changelens base --tests-only
+tests/test_refunds.py
+tests/test_statements.py
+tests/test_webhooks.py
+
+$ echo $?
+0
+```
+
+So the loop while you work is:
+
+```sh
+T=$(changelens main --tests-only) && [ -n "$T" ] && pytest $T
+```
+
+**Guard the pipe.** When nothing downstream of a change is a test file,
+stdout is empty and the explanation goes to stderr, because a runner reading
+that stream would try to collect the sentence as a path. An unguarded
+`pytest $(changelens main --tests-only)` would then run your whole suite,
+which is a slow surprise rather than a wrong answer, but a surprise either
+way. `--fail-on` still works alongside it: the gate block goes to stderr and
+the exit code is still the gate's.
 
 ## CI gating
 
@@ -445,7 +479,7 @@ src/changelens/
   gate.py              --fail-on expressions, metrics, pass/fail decision
   baseline.py          the saved-report file format, its comparability,
                        and what its recorded commit turned out to be
-  report.py            terminal, JSON, and mermaid renderers
+  report.py            terminal, JSON, mermaid, and test-path renderers
 ```
 
 v0.1 analyzes Python repositories only, so the analysis can be genuinely
